@@ -1,9 +1,10 @@
 const API = "https://api.github.com";
 
 export class GitHubError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -41,9 +42,9 @@ export async function writeFile(cfg, text, sha) {
 export async function ensureBranch(cfg) {
   if (await call(cfg.token, `/repos/${cfg.repo}/branches/${encodeURIComponent(cfg.branch)}`)) return;
   const repo = await call(cfg.token, `/repos/${cfg.repo}`);
-  if (!repo) throw new GitHubError(404, `Repository ${cfg.repo} not found, or the token cannot see it.`);
+  if (!repo) throw new GitHubError(404, `Repository ${cfg.repo} not found, or the token cannot see it.`, "errRepo");
   const head = await call(cfg.token, `/repos/${cfg.repo}/git/ref/heads/${encodeURIComponent(repo.default_branch)}`);
-  if (!head) throw new GitHubError(404, `${cfg.repo} has no commits yet.`);
+  if (!head) throw new GitHubError(404, `${cfg.repo} has no commits yet.`, "errEmptyRepo");
   await call(cfg.token, `/repos/${cfg.repo}/git/refs`, {
     method: "POST",
     body: { ref: `refs/heads/${cfg.branch}`, sha: head.object.sha },

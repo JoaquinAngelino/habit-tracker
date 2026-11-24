@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f7f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1d2024" media="(prefers-color-scheme: dark)">
   <title>Habit Tracker</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect y='9' width='32' height='14' fill='%231d8a4e'/%3E%3Cpath d='M9 16l4 4 9-8' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
   <link rel="preload" href="fonts/barlow-condensed-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
@@ -12,49 +14,53 @@
 </head>
 <body>
   <header class="topbar">
-    <h1 class="brand">Habit Tracker</h1>
-    <nav class="tabs" aria-label="Views">
-      <a class="tab" href="#today" aria-current="page">Today</a>
-      <a class="tab" href="#progress">Progress</a>
-      <a class="tab" href="#habits">Habits</a>
+    <h1 class="brand" data-i18n="title">Habit Tracker</h1>
+    <nav class="tabs" aria-label="Views" data-i18n-label="views">
+      <a class="tab" href="#today" aria-current="page" data-i18n="tabToday">Today</a>
+      <a class="tab" href="#progress" data-i18n="tabProgress">Progress</a>
+      <a class="tab" href="#habits" data-i18n="tabHabits">Habits</a>
     </nav>
     <span id="today" class="today"></span>
-    <span id="sync" class="status" role="status"></span>
-    <button id="settingsToggle" type="button" class="btn" aria-expanded="false" aria-controls="settings">Settings</button>
+    <span id="sync" class="status sync" role="status"></span>
+    <button id="settingsToggle" type="button" class="btn" aria-expanded="false" aria-controls="settings" data-i18n="settings">Settings</button>
+    <select id="language" class="lang" aria-label="Language" data-i18n-label="language">
+      <option value="en">English</option>
+      <option value="es">Español</option>
+    </select>
   </header>
 
   <section id="settings" class="settings" hidden>
     <div class="setting">
       <label class="field">
-        <span class="field-label">Repository</span>
-        <input id="repo" spellcheck="false" autocomplete="off" placeholder="owner/habit-tracker">
+        <span class="field-label" data-i18n="repo">Repository</span>
+        <input id="repo" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="owner/habit-tracker">
       </label>
       <label class="field">
-        <span class="field-label">Branch</span>
-        <input id="branch" spellcheck="false" autocomplete="off" placeholder="data">
+        <span class="field-label" data-i18n="branch">Branch</span>
+        <input id="branch" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="data">
       </label>
-      <p class="hint">Habits are saved encrypted to <code>data/habits.enc</code> on this branch. It is created from the default branch on first save, so saving never redeploys the site.</p>
+      <p class="hint" data-i18n-html="branchHint"></p>
     </div>
     <div class="setting">
       <label class="field">
-        <span class="field-label">GitHub token</span>
+        <span class="field-label" data-i18n="token">GitHub token</span>
         <input id="token" type="password" autocomplete="off" spellcheck="false">
       </label>
-      <p class="hint">A fine-grained token for this one repository with <strong>Contents: Read and write</strong>. It is sent only to <code>api.github.com</code>.</p>
+      <p class="hint" data-i18n-html="tokenHint"></p>
     </div>
     <div class="setting">
       <label class="field">
-        <span class="field-label">Passphrase</span>
+        <span class="field-label" data-i18n="passphrase">Passphrase</span>
         <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
       </label>
-      <p class="hint">Encrypts your habits before they leave this device. The file is public, so anyone can try to guess it: use four or more random words. If you lose it, the data cannot be recovered.</p>
+      <p class="hint" data-i18n-html="passphraseHint"></p>
       <label class="check">
         <input id="remember" type="checkbox">
-        <span>Remember token and passphrase on this device</span>
+        <span data-i18n="remember">Remember token and passphrase on this device</span>
       </label>
       <div class="row">
-        <button id="syncNow" type="button" class="btn">Sync now</button>
-        <button id="forget" type="button" class="btn-text btn-small">Forget token and passphrase</button>
+        <button id="syncNow" type="button" class="btn" data-i18n="syncNow">Sync now</button>
+        <button id="forget" type="button" class="btn-text btn-small" data-i18n="forget">Forget token and passphrase</button>
       </div>
     </div>
   </section>

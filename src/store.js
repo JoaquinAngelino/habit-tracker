@@ -1,6 +1,7 @@
 import { emptyData, normalize, replay, queue } from "./lib.js";
 import { deriveKey, seal, unseal, readEnvelope, newSalt } from "./crypto.js";
 import { readFile, writeFile, ensureBranch } from "./github.js";
+import { t } from "./i18n.js";
 
 const CACHE_KEY = "ht.cache.v1";
 
@@ -46,11 +47,12 @@ function loadCache() {
   }
 }
 
-function describe(err) {
-  if (err?.name === "OperationError") return "Wrong passphrase: the data file could not be decrypted.";
-  if (err?.status === 401) return "GitHub rejected the token.";
-  if (err?.status === 403 || err?.status === 404) return `${err.message} Check the repository name and that the token has Contents read and write.`;
-  if (err instanceof TypeError) return "GitHub could not be reached.";
+function describe(err, repo) {
+  if (err?.name === "OperationError") return t("errPassphrase");
+  if (err?.code) return t(err.code, { repo });
+  if (err?.status === 401) return t("errToken");
+  if (err?.status === 403 || err?.status === 404) return t("errAccess", { message: err.message });
+  if (err instanceof TypeError) return t("errNetwork");
   return err?.message || String(err);
 }
 
@@ -117,7 +119,7 @@ export function createStore({ config, onChange, onStatus }) {
         break;
       }
     } catch (err) {
-      onStatus("error", describe(err));
+      onStatus("error", describe(err, cfg.repo));
     } finally {
       running = false;
       if (again) {

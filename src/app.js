@@ -1,17 +1,18 @@
 import { $, el, icon, iconButton } from "./ui.js";
 import { TYPES, localIso, addDays, weekStart, uid, entry, isDone, weekCount, streak, rate, level, goalProgress } from "./lib.js";
 import { createStore, local, session, read, write } from "./store.js";
+import { t, setLanguage, getLanguage, applyTranslations } from "./i18n.js";
 
 const CONFIG_KEY = "ht.config";
 const TOKEN_KEY = "ht.token";
 const PASS_KEY = "ht.passphrase";
+const LANG_KEY = "ht.lang";
 const DATA_PATH = "data/habits.enc";
 const VIEWS = ["today", "progress", "habits"];
-const TYPE_LABEL = { check: "Daily", weekly: "Weekly", amount: "Amount", avoid: "Avoid" };
 const DEFAULT_TARGET = { check: 1, weekly: 3, amount: 1, avoid: 1 };
 
 const today = () => localIso();
-const ui = { day: today(), shownToday: today(), confirmDelete: null, goalDraft: null, focus: null };
+const ui = { day: today(), shownToday: today(), confirmDelete: null, goalDraft: null, focus: null, status: ["off", ""], syncedAt: null };
 
 function loadSettings() {
   const defaults = { repo: "", branch: "data", remember: true };
@@ -47,22 +48,22 @@ const activeHabits = () => data().habits.filter((h) => !h.archived);
 
 function fmtDay(iso, opts = { weekday: "short", month: "short", day: "numeric" }) {
   const [y, m, d] = iso.split("-").map(Number);
-  return new Intl.DateTimeFormat("en-US", opts).format(new Date(y, m - 1, d));
+  return new Intl.DateTimeFormat(getLanguage(), opts).format(new Date(y, m - 1, d));
 }
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const num = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10));
-const percent = (r) => (r == null ? "–" : `${Math.round(r * 100)}%`);
-const habitName = (habit) => habit.name.trim() || "Untitled habit";
+const num = (n) => new Intl.NumberFormat(getLanguage(), { maximumFractionDigits: 1 }).format(n);
+const percent = (r) => (r == null ? "–" : new Intl.NumberFormat(getLanguage(), { style: "percent" }).format(r));
+const units = (count, unit) => t(unit, { count });
+const habitName = (habit) => habit.name.trim() || t("untitled");
 
 function streakText(habit, s) {
-  if (habit.type === "avoid") return `${plural(s.current, "day")} clean`;
-  return s.current ? `${plural(s.current, s.unit)} streak` : "No streak";
+  if (habit.type === "avoid") return t("clean", { units: units(s.current, "day") });
+  return s.current ? t("streak", { units: units(s.current, s.unit) }) : t("noStreak");
 }
 
 function goalUnit(habit) {
-  if (habit.type === "amount") return habit.unit.trim() || "total";
-  return habit.type === "avoid" ? "clean days" : "times";
+  if (habit.type === "amount") return habit.unit.trim() || t("unit_total");
+  return t(habit.type === "avoid" ? "unit_clean" : "unit_times");
 }
 
 /* Building blocks */
@@ -86,6 +87,8 @@ function lane(tone, title, { count = "", tools = [], rows, empty }) {
     el("div", { class: "rows" }, rows.length ? rows : [el("p", { class: "lane-empty" }, [].concat(empty))]),
   ]);
 }
+
+const firstHabitLink = () => [`${t("noHabits")} `, el("a", { href: "#habits", textContent: t("addFirst") }), "."];
 
 function setLog(habit, date, value) {
   store.commit({ t: "log", date, id: habit.id, v: value > 0 ? value : 0 });
@@ -111,21 +114,21 @@ function todayTape(habit, day, value) {
       inputMode: "decimal",
       value: value || "",
       placeholder: "0",
-      "aria-label": `${habitName(habit)}, amount`,
+      "aria-label": t("amountOf", { name: habitName(habit) }),
       "data-focus-key": `${habit.id}:amount`,
       onchange: () => setLog(habit, day, Number(input.value) || 0),
       onkeydown: (e) => e.key === "Enter" && input.blur(),
     });
     return el("label", { class: `tape item-tape${tone}` }, [input, el("span", { class: "tape-of", textContent: `/${num(habit.target || 1)}` })]);
   }
-  const pressed = habit.type === "avoid" ? slipped : done;
+  const avoid = habit.type === "avoid";
   return el("button", {
     type: "button",
     class: `tape item-tape${tone}`,
-    "aria-pressed": String(pressed),
-    title: habit.type === "avoid" ? (slipped ? "Undo the slip" : "Log a slip") : done ? "Mark as not done" : "Mark as done",
+    "aria-pressed": String(avoid ? slipped : done),
+    title: t(avoid ? (slipped ? "undoSlip" : "logSlip") : done ? "markUndone" : "markDone"),
     "data-focus-key": `${habit.id}:tape`,
-    textContent: habit.type === "avoid" ? (slipped ? "Slipped" : "Clean") : done ? "Done" : "To do",
+    textContent: t(avoid ? (slipped ? "tape_slipped" : "tape_clean") : done ? "tape_done" : "tape_todo"),
     onclick: () => setLog(habit, day, value ? 0 : 1),
   });
 }
@@ -135,13 +138,13 @@ function todayRow(habit, day) {
   const value = entry(d, habit.id, day);
   const s = streak(d, habit, today());
   const marks = [mark(streakText(habit, s), s.current ? "green" : null)];
-  if (s.best > s.current) marks.push(mark(`Best ${plural(s.best, s.unit)}`));
-  if (habit.type === "weekly") marks.push(mark(`${weekCount(d, habit, day)} of ${habit.target} this week`));
+  if (s.best > s.current) marks.push(mark(t("best", { units: units(s.best, s.unit) })));
+  if (habit.type === "weekly") marks.push(mark(t("thisWeek", { count: weekCount(d, habit, day), target: habit.target })));
   if (habit.type === "amount" && habit.unit.trim()) marks.push(mark(habit.unit.trim()));
   const stepper = habit.type === "amount"
     ? el("div", { class: "item-actions" }, [
-      iconButton("minus", "One less", () => setLog(habit, day, Math.max(0, value - 1)), { disabled: !value }),
-      iconButton("plus", "One more", () => setLog(habit, day, value + 1)),
+      iconButton("minus", t("oneLess"), () => setLog(habit, day, Math.max(0, value - 1)), { disabled: !value }),
+      iconButton("plus", t("oneMore"), () => setLog(habit, day, value + 1)),
     ])
     : null;
   return el("article", { class: "item", "data-id": habit.id }, [
@@ -166,17 +169,15 @@ function todayView() {
     render();
   };
   return [
-    lane("green", day === now ? "Today" : fmtDay(day), {
-      count: habits.length ? `${done} of ${habits.length} done` : "",
+    lane("green", day === now ? t("today") : fmtDay(day), {
+      count: habits.length ? t("doneCount", { done, total: habits.length }) : "",
       tools: [
-        day !== now ? textButton("Back to today", () => go(now), { small: true }) : null,
-        iconButton("left", "Previous day", () => go(addDays(day, -1))),
-        iconButton("right", "Next day", () => go(addDays(day, 1)), { disabled: day >= now }),
+        day !== now ? textButton(t("backToday"), () => go(now), { small: true }) : null,
+        iconButton("left", t("prevDay"), () => go(addDays(day, -1))),
+        iconButton("right", t("nextDay"), () => go(addDays(day, 1)), { disabled: day >= now }),
       ],
       rows: habits.map((h) => todayRow(h, day)),
-      empty: activeHabits().length
-        ? "No habits had started by this day."
-        : ["No habits yet. ", el("a", { href: "#habits", textContent: "Add your first one" }), "."],
+      empty: activeHabits().length ? t("noneStarted") : firstHabitLink(),
     }),
   ];
 }
@@ -185,33 +186,38 @@ function todayView() {
 
 function goalRow(goal, habit) {
   const p = goalProgress(data(), goal, habit, today());
-  const unit = goalUnit(habit);
   const gap = Math.max(1, Math.round(Math.abs(p.diff)));
   const tone = { done: " is-done", ahead: " is-done", behind: " is-behind", missed: " is-slip" }[p.status];
   const status = {
-    done: mark("Reached", "green"),
-    missed: mark("Missed", "red"),
-    ahead: mark(`On pace${p.diff >= 0.5 ? `, ${gap} ahead` : ""}`, "green"),
-    behind: mark(`${gap} behind · ${num(Math.ceil(p.perDay * 10) / 10)} a day to finish`, "yellow"),
+    done: mark(t("reached"), "green"),
+    missed: mark(t("missed"), "red"),
+    ahead: mark(p.diff >= 0.5 ? t("onPaceAhead", { count: gap }) : t("onPace"), "green"),
+    behind: mark(t("behind", { count: gap, perDay: num(Math.ceil(p.perDay * 10) / 10) }), "yellow"),
   }[p.status];
-  const title = `${habitName(habit)}: ${num(goal.target)} ${unit} by ${fmtDay(goal.deadline, { month: "short", day: "numeric", year: "numeric" })}`;
+  const title = t("goalTitle", {
+    habit: habitName(habit),
+    target: num(goal.target),
+    unit: goalUnit(habit),
+    date: fmtDay(goal.deadline, { month: "short", day: "numeric", year: "numeric" }),
+  });
   const open = p.status === "ahead" || p.status === "behind";
+  const pct = Math.floor(p.pct * 100);
   return el("article", { class: "item", "data-id": goal.id }, [
     el("div", { class: "item-main" }, [
-      el("span", { class: `tape item-tape${tone}`, textContent: `${Math.floor(p.pct * 100)}%` }),
+      el("span", { class: `tape item-tape${tone}`, textContent: `${pct}%` }),
       el("div", { class: "item-body" }, [
         el("p", { class: "item-title", textContent: title }),
-        el("div", { class: "bar", role: "progressbar", "aria-label": title, "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.floor(p.pct * 100) }, [
+        el("div", { class: "bar", role: "progressbar", "aria-label": title, "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": pct }, [
           el("span", { class: "bar-fill", style: `width:${p.pct * 100}%` }),
-          open ? el("span", { class: "bar-pace", style: `left:${p.expectedPct * 100}%`, title: "Where you should be by today" }) : null,
+          open ? el("span", { class: "bar-pace", style: `left:${p.expectedPct * 100}%`, title: t("pace") }) : null,
         ]),
         el("p", { class: "item-marks" }, [
-          mark(`${num(p.done)} of ${num(goal.target)}`),
-          open ? mark(`${plural(p.daysLeft, "day")} left`) : null,
+          mark(t("ofTarget", { done: num(p.done), target: num(goal.target) })),
+          open ? mark(t("daysLeft", { count: p.daysLeft })) : null,
           status,
         ]),
       ]),
-      el("div", { class: "item-x" }, [iconButton("x", "Remove goal", () => store.commit({ t: "delGoal", id: goal.id }))]),
+      el("div", { class: "item-x" }, [iconButton("x", t("removeGoal"), () => store.commit({ t: "delGoal", id: goal.id }))]),
     ]),
   ]);
 }
@@ -222,30 +228,71 @@ function goalForm(habits) {
   const habit = habits.find((h) => h.id === draft.habitId);
   const habitSelect = el(
     "select",
-    { class: "pill-select is-set", "aria-label": "Habit", "data-focus-key": "goal:habit", onchange: () => { draft.habitId = habitSelect.value; render(); } },
+    {
+      class: "pill-select",
+      "aria-label": t("habit"),
+      "data-focus-key": "goal:habit",
+      onchange: () => {
+        draft.habitId = habitSelect.value;
+        render();
+      },
+    },
     habits.map((h) => el("option", { value: h.id, textContent: habitName(h) })),
   );
   habitSelect.value = draft.habitId;
-  const target = el("input", { type: "number", class: "num-input", min: 1, step: "any", value: draft.target, "aria-label": "Target", "data-focus-key": "goal:target", oninput: () => { draft.target = target.value; } });
-  const deadline = el("input", { type: "date", value: draft.deadline, min: today(), "aria-label": "Deadline", "data-focus-key": "goal:deadline", oninput: () => { draft.deadline = deadline.value; } });
+  const target = el("input", {
+    type: "number",
+    class: "num-input",
+    min: 1,
+    step: "any",
+    inputMode: "decimal",
+    value: draft.target,
+    "aria-label": t("target"),
+    "data-focus-key": "goal:target",
+    oninput: () => {
+      draft.target = target.value;
+    },
+  });
+  const deadline = el("input", {
+    type: "date",
+    value: draft.deadline,
+    min: today(),
+    "aria-label": t("deadline"),
+    "data-focus-key": "goal:deadline",
+    oninput: () => {
+      draft.deadline = deadline.value;
+    },
+  });
   const add = () => {
     const value = Number(draft.target);
     if (!(value > 0) || !draft.deadline || draft.deadline < today()) return;
     ui.goalDraft = null;
     store.commit({ t: "goal", goal: { id: uid(), habitId: draft.habitId, target: value, start: today(), deadline: draft.deadline } });
   };
+  const cancel = () => {
+    ui.goalDraft = null;
+    render();
+  };
   return el("div", { class: "item" }, [
     el("div", { class: "item-meta" }, [
       habitSelect,
       el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: goalUnit(habit) })]),
-      el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: "by" }), deadline]),
-      el("button", { type: "button", class: "btn", textContent: "Add goal", onclick: add }),
-      textButton("Cancel", () => { ui.goalDraft = null; render(); }, { small: true }),
+      el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("by") }), deadline]),
+      el("span", { class: "meta-group" }, [
+        el("button", { type: "button", class: "btn", textContent: t("addGoal"), onclick: add }),
+        textButton(t("cancel"), cancel, { small: true }),
+      ]),
     ]),
   ]);
 }
 
 const stat = (label, value) => el("div", { class: "stat" }, [el("dt", { textContent: label }), el("dd", { textContent: value })]);
+
+function cellText(habit, value, lvl) {
+  if (habit.type === "amount") return t("cell_amount", { value: num(value), target: num(habit.target || 1) });
+  if (habit.type === "avoid") return t(lvl < 0 ? "cell_slipped" : "cell_clean");
+  return t(value ? "cell_done" : "cell_missed");
+}
 
 function heatmap(habit) {
   const d = data();
@@ -255,38 +302,44 @@ function heatmap(habit) {
   for (let i = 0; i < 53 * 7; i++) {
     const date = addDays(first, i);
     const lvl = date > now ? null : level(d, habit, date, now) ?? "before";
-    let text = "";
-    if (lvl != null && lvl !== "before") {
-      const v = entry(d, habit.id, date);
-      text = habit.type === "amount" ? `${num(v)} of ${num(habit.target || 1)}` : habit.type === "avoid" ? (v ? "slipped" : "clean") : v ? "done" : "missed";
-    }
-    cells.push(el("span", { class: "cell", "data-level": lvl ?? "none", title: text && `${fmtDay(date)}: ${text}` }));
+    const text = lvl == null || lvl === "before" ? "" : `${fmtDay(date)}: ${cellText(habit, entry(d, habit.id, date), lvl)}`;
+    cells.push(el("span", { class: "cell", "data-level": lvl ?? "none", title: text }));
   }
-  return el("div", { class: "heatmap-wrap" }, [el("div", { class: "heatmap", role: "img", "aria-label": `${habitName(habit)}, last 12 months` }, cells)]);
+  return el("div", { class: "heatmap-wrap" }, [
+    el("div", { class: "heatmap", role: "img", "aria-label": t("heatmapLabel", { name: habitName(habit) }) }, cells),
+  ]);
 }
 
 function statsRow(habit) {
   const d = data();
   const now = today();
   const s = streak(d, habit, now);
-  const target = habit.type === "weekly" ? `, ${habit.target} a week` : habit.type === "amount" ? `, ${num(habit.target)} ${habit.unit.trim()} a day` : "";
+  let kind = t(`type_${habit.type}`);
+  if (habit.type === "weekly") kind += ` · ${t("perWeek", { count: habit.target })}`;
+  if (habit.type === "amount") kind += ` · ${t("perDayUnit", { count: num(habit.target), unit: habit.unit.trim() })}`;
   return el("article", { class: "item", "data-id": habit.id }, [
     el("div", { class: "item-main" }, [
-      el("span", { class: `tape item-tape${s.current ? " is-done" : ""}`, title: streakText(habit, s), textContent: `${s.current}${s.unit === "week" ? "W" : "D"}` }),
+      el("span", { class: `tape item-tape${s.current ? " is-done" : ""}`, title: streakText(habit, s), textContent: t(`short_${s.unit}`, { count: s.current }) }),
       el("div", { class: "item-body" }, [
         el("p", { class: "item-title", textContent: habitName(habit) }),
-        el("p", { class: "item-marks" }, [mark(`${TYPE_LABEL[habit.type]}${target}`)]),
+        el("p", { class: "item-marks" }, [mark(kind)]),
       ]),
     ]),
     el("dl", { class: "stats" }, [
-      stat(habit.type === "avoid" ? "Clean" : "Streak", plural(s.current, s.unit)),
-      stat("Best", plural(s.best, s.unit)),
-      stat("Last 7 days", percent(rate(d, habit, now, 7))),
-      stat("Last 30 days", percent(rate(d, habit, now, 30))),
-      stat("Last 90 days", percent(rate(d, habit, now, 90))),
+      stat(t(habit.type === "avoid" ? "cleanLabel" : "streakLabel"), units(s.current, s.unit)),
+      stat(t("bestLabel"), units(s.best, s.unit)),
+      stat(t("last7"), percent(rate(d, habit, now, 7))),
+      stat(t("last30"), percent(rate(d, habit, now, 30))),
+      stat(t("last90"), percent(rate(d, habit, now, 90))),
     ]),
     heatmap(habit),
   ]);
+}
+
+function startGoal(habits) {
+  ui.goalDraft = { habitId: habits[0].id, target: "30", deadline: addDays(today(), 30) };
+  ui.focus = "goal:target";
+  render();
 }
 
 function progressView() {
@@ -296,18 +349,13 @@ function progressView() {
   const rows = goals.map((g) => goalRow(g, byId.get(g.habitId)));
   if (ui.goalDraft && habits.length) rows.push(goalForm(habits));
   return [
-    lane("purple", "Goals", {
-      count: goals.length ? plural(goals.length, "goal") : "",
-      tools: habits.length && !ui.goalDraft
-        ? [textButton("Add goal", () => { ui.goalDraft = { habitId: habits[0].id, target: "30", deadline: addDays(today(), 30) }; ui.focus = "goal:target"; render(); }, { plus: true })]
-        : [],
+    lane("purple", t("goals"), {
+      count: goals.length ? t("goals", { count: goals.length }) : "",
+      tools: habits.length && !ui.goalDraft ? [textButton(t("addGoal"), () => startGoal(habits), { plus: true })] : [],
       rows,
-      empty: habits.length ? "No goals yet. Try something like 100 runs by the end of the year." : "Add a habit first.",
+      empty: habits.length ? t("noGoals") : t("addHabitFirst"),
     }),
-    lane("blue", "Stats", {
-      rows: habits.map(statsRow),
-      empty: ["No habits yet. ", el("a", { href: "#habits", textContent: "Add your first one" }), "."],
-    }),
+    lane("blue", t("stats"), { rows: habits.map(statsRow), empty: firstHabitLink() }),
   ];
 }
 
@@ -324,8 +372,8 @@ function editRow(habit) {
   const name = el("input", {
     class: "title-input",
     value: habit.name,
-    placeholder: "Habit, like Read or No sugar",
-    "aria-label": "Habit name",
+    placeholder: t("namePlaceholder"),
+    "aria-label": t("habitName"),
     "data-focus-key": `${habit.id}:name`,
     oninput: () => patch({ name: name.value }, { quiet: true }),
     onchange: () => render(),
@@ -333,8 +381,8 @@ function editRow(habit) {
   });
   const type = el(
     "select",
-    { class: "pill-select is-set", "aria-label": "Type", "data-focus-key": `${habit.id}:type`, onchange: () => patch({ type: type.value, target: DEFAULT_TARGET[type.value] }) },
-    TYPES.map((t) => el("option", { value: t, textContent: TYPE_LABEL[t] })),
+    { class: "pill-select", "aria-label": t("type"), "data-focus-key": `${habit.id}:type`, onchange: () => patch({ type: type.value, target: DEFAULT_TARGET[type.value] }) },
+    TYPES.map((k) => el("option", { value: k, textContent: t(`type_${k}`) })),
   );
   type.value = habit.type;
   const fields = [type];
@@ -344,19 +392,20 @@ function editRow(habit) {
       class: "num-input",
       min: 1,
       step: "any",
+      inputMode: "decimal",
       value: habit.target,
-      "aria-label": "Target",
+      "aria-label": t("target"),
       "data-focus-key": `${habit.id}:target`,
       onchange: () => patch({ target: Number(target.value) > 0 ? Number(target.value) : 1 }),
     });
-    fields.push(el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: habit.type === "weekly" ? "times a week" : "a day" })]));
+    fields.push(el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: t(habit.type === "weekly" ? "timesWeek" : "aDay") })]));
   }
   if (habit.type === "amount") {
     const unit = el("input", {
       class: "unit-input",
       value: habit.unit,
-      placeholder: "Unit, like pages",
-      "aria-label": "Unit",
+      placeholder: t("unitPlaceholder"),
+      "aria-label": t("unit"),
       "data-focus-key": `${habit.id}:unit`,
       oninput: () => patch({ unit: unit.value }, { quiet: true }),
     });
@@ -366,21 +415,27 @@ function editRow(habit) {
     type: "date",
     value: habit.start,
     max: today(),
-    "aria-label": "Start date",
+    "aria-label": t("startDate"),
     "data-focus-key": `${habit.id}:start`,
     onchange: () => start.value && patch({ start: start.value }),
   });
-  fields.push(el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: "Since" }), start]));
+  fields.push(el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("since") }), start]));
 
-  const confirming = ui.confirmDelete === habit.id;
-  const actions = confirming
+  const setConfirm = (id) => {
+    ui.confirmDelete = id;
+    render();
+  };
+  const actions = ui.confirmDelete === habit.id
     ? [
-      textButton("Delete it and its history", () => { ui.confirmDelete = null; store.commit({ t: "delHabit", id: habit.id }); }, { danger: true }),
-      textButton("Cancel", () => { ui.confirmDelete = null; render(); }, { small: true }),
+      textButton(t("deleteConfirm"), () => {
+        ui.confirmDelete = null;
+        store.commit({ t: "delHabit", id: habit.id });
+      }, { danger: true }),
+      textButton(t("cancel"), () => setConfirm(null), { small: true }),
     ]
     : [
-      textButton(habit.archived ? "Restore" : "Archive", () => patch({ archived: !habit.archived }), { small: true }),
-      iconButton("x", "Delete habit", () => { ui.confirmDelete = habit.id; render(); }),
+      textButton(t(habit.archived ? "restore" : "archive"), () => patch({ archived: !habit.archived }), { small: true }),
+      iconButton("x", t("deleteHabit"), () => setConfirm(habit.id)),
     ];
   return el("article", { class: "item", "data-id": habit.id }, [
     el("div", { class: "edit-row" }, [name, el("div", { class: "item-actions" }, actions)]),
@@ -393,13 +448,13 @@ function habitsView() {
   const current = habits.filter((h) => !h.archived);
   const archived = habits.filter((h) => h.archived);
   return [
-    lane("yellow", "Habits", {
-      count: current.length ? plural(current.length, "habit") : "",
-      tools: [textButton("Add habit", addHabit, { plus: true })],
+    lane("yellow", t("habits"), {
+      count: current.length ? t("habits", { count: current.length }) : "",
+      tools: [textButton(t("addHabit"), addHabit, { plus: true })],
       rows: current.map(editRow),
-      empty: "No habits yet. Daily ones are checked off, weekly ones count toward N times a week, amounts add up to a daily target, and avoid ones count clean days.",
+      empty: t("habitsEmpty"),
     }),
-    archived.length ? lane("muted", "Archived", { count: plural(archived.length, "habit"), rows: archived.map(editRow) }) : null,
+    archived.length ? lane("muted", t("archived"), { count: t("habits", { count: archived.length }), rows: archived.map(editRow) }) : null,
   ];
 }
 
@@ -419,7 +474,7 @@ function render() {
   const jump = Boolean(ui.focus);
   const focus = ui.focus ?? active?.dataset?.focusKey;
   let selection = null;
-  if (!ui.focus && active?.selectionStart != null) selection = [active.selectionStart, active.selectionEnd];
+  if (!jump && active?.selectionStart != null) selection = [active.selectionStart, active.selectionEnd];
   ui.focus = null;
 
   const builders = { today: todayView, progress: progressView, habits: habitsView };
@@ -437,20 +492,30 @@ function render() {
   }
 }
 
-function showStatus(state, message = "") {
-  const time = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date());
+function paintStatus() {
+  const [state, message] = ui.status;
+  const time = ui.syncedAt ? new Intl.DateTimeFormat(getLanguage(), { hour: "numeric", minute: "2-digit" }).format(ui.syncedAt) : "";
   const status = $("#sync");
-  status.textContent = {
-    off: "Not synced",
-    local: "Saved on this device",
-    syncing: "Syncing…",
-    synced: `Synced ${time}`,
-    error: "Sync failed",
-  }[state];
+  status.textContent = t(`status_${state}`, { time });
   status.dataset.tone = state === "error" ? "error" : state === "synced" ? "ok" : "";
   const banner = $("#banner");
   banner.hidden = state !== "error";
   banner.textContent = message;
+}
+
+function showStatus(state, message = "") {
+  ui.status = [state, message];
+  if (state === "synced") ui.syncedAt = new Date();
+  paintStatus();
+}
+
+function changeLanguage(lang) {
+  write(local, LANG_KEY, setLanguage(lang));
+  applyTranslations();
+  render();
+  // Sync errors are worded when they happen, so a retry rewords them.
+  if (ui.status[0] === "error") store.sync();
+  else paintStatus();
 }
 
 function initSettings() {
@@ -503,6 +568,10 @@ function initSettings() {
   setOpen(!cfg.repo || !cfg.token || !cfg.passphrase);
 }
 
+const lang = setLanguage(read(local, LANG_KEY) || (navigator.language?.startsWith("es") ? "es" : "en"));
+$("#language").value = lang;
+$("#language").addEventListener("change", (e) => changeLanguage(e.target.value));
+applyTranslations();
 initSettings();
 window.addEventListener("hashchange", () => {
   ui.confirmDelete = null;
@@ -516,5 +585,6 @@ document.addEventListener("visibilitychange", () => {
   render();
   store.sync();
 });
+paintStatus();
 render();
 store.sync();

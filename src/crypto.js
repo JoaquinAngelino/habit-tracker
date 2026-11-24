@@ -32,7 +32,7 @@ export async function seal(value, key, salt, iterations = ITERATIONS) {
 export function readEnvelope(text) {
   const envelope = JSON.parse(text);
   if (envelope?.v !== 1 || envelope.kdf !== "PBKDF2-SHA256" || !envelope.salt || !envelope.iv || !envelope.data) {
-    throw new Error("Unrecognized data file format.");
+    throw Object.assign(new Error("Unrecognized data file format."), { code: "errFormat" });
   }
   return envelope;
 }

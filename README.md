@@ -2,6 +2,8 @@
 
 A minimal habit tracker in the style of [Daily Standup Generator](https://github.com/JoaquinAngelino/daily-standup-generator). Check habits off each day, see streaks, completion rates and a year heatmap, and set goals with a deadline and a pace line.
 
+In English and Spanish (picked from the browser, switchable in the top bar), and built for phones first.
+
 ## Habits
 
 - **Daily**: done or not, every day.
