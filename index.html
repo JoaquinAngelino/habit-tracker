@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Habit Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect y='9' width='32' height='14' fill='%231d8a4e'/%3E%3Cpath d='M9 16l4 4 9-8' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="preload" href="fonts/barlow-condensed-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="src/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">Habit Tracker</h1>
+    <nav class="tabs" aria-label="Views">
+      <a class="tab" href="#today" aria-current="page">Today</a>
+      <a class="tab" href="#progress">Progress</a>
+      <a class="tab" href="#habits">Habits</a>
+    </nav>
+    <span id="today" class="today"></span>
+    <span id="sync" class="status" role="status"></span>
+    <button id="settingsToggle" type="button" class="btn" aria-expanded="false" aria-controls="settings">Settings</button>
+  </header>
+
+  <section id="settings" class="settings" hidden>
+    <div class="setting">
+      <label class="field">
+        <span class="field-label">Repository</span>
+        <input id="repo" spellcheck="false" autocomplete="off" placeholder="owner/habit-tracker">
+      </label>
+      <label class="field">
+        <span class="field-label">Branch</span>
+        <input id="branch" spellcheck="false" autocomplete="off" placeholder="data">
+      </label>
+      <p class="hint">Habits are saved encrypted to <code>data/habits.enc</code> on this branch. It is created from the default branch on first save, so saving never redeploys the site.</p>
+    </div>
+    <div class="setting">
+      <label class="field">
+        <span class="field-label">GitHub token</span>
+        <input id="token" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="hint">A fine-grained token for this one repository with <strong>Contents: Read and write</strong>. It is sent only to <code>api.github.com</code>.</p>
+    </div>
+    <div class="setting">
+      <label class="field">
+        <span class="field-label">Passphrase</span>
+        <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="hint">Encrypts your habits before they leave this device. The file is public, so anyone can try to guess it: use four or more random words. If you lose it, the data cannot be recovered.</p>
+      <label class="check">
+        <input id="remember" type="checkbox">
+        <span>Remember token and passphrase on this device</span>
+      </label>
+      <div class="row">
+        <button id="syncNow" type="button" class="btn">Sync now</button>
+        <button id="forget" type="button" class="btn-text btn-small">Forget token and passphrase</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+  <main id="view" class="work"></main>
+</body>
+</html>
