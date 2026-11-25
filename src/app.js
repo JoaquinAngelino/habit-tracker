@@ -720,7 +720,10 @@ window.addEventListener("hashchange", () => {
   window.scrollTo(0, 0);
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") return;
+  if (document.visibilityState !== "visible") {
+    if (store.hasPending()) store.sync();
+    return;
+  }
   if (ui.day === ui.shownToday) ui.day = today();
   ui.shownToday = today();
   render();

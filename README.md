@@ -24,13 +24,13 @@ One-off things to do, buy or fix, with an optional due date. Tasks due today or 
 
 Everything saves in the browser first and works offline. With a repository, token and passphrase in **Settings**, it also syncs to `data/habits.enc` on the `data` branch of that repository, so every device you set up sees the same habits. The branch is created on first save and keeps data commits off the branch the site deploys from.
 
-The file is encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent. The repository is public, so:
+The file is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent. The repository is public, so:
 
 - Anyone can download the file and try passphrases offline. Use four or more random words.
 - Commit times are visible, though not what changed.
 - A lost passphrase cannot be recovered, and neither can the data.
 
-Each sync reads the file, replays your unsynced edits on top and writes it back, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced.
+Changes save to the repository 30 seconds after your last edit, when you leave the app, or with **Sync now**; every save is a commit, so batching keeps the branch history small. Each sync reads the file, replays your unsynced edits on top and writes it back, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced.
 
 ## Token
 

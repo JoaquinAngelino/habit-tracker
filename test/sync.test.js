@@ -12,6 +12,22 @@ test("sealed data opens with the same passphrase and fails with another", async 
   await assert.rejects(unseal(envelope, await deriveKey("wrong horse", salt, 1000)), { name: "OperationError" });
 });
 
+test("files are compressed before encrypting, and uncompressed version 1 files still open", async () => {
+  const salt = newSalt();
+  const key = await deriveKey("right horse", salt, 1000);
+  const value = { log: Object.fromEntries(Array.from({ length: 365 }, (_, i) => [`2026-${i}`, { abcdefgh: 1 }])) };
+  const envelope = readEnvelope(await seal(value, key, salt, 1000));
+  assert.equal(envelope.v, 2);
+  assert.ok(atob(envelope.data).length < JSON.stringify(value).length / 5);
+  assert.deepEqual(await unseal(envelope, key), value);
+
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode('{"a":1}'));
+  const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
+  const legacy = { v: 1, kdf: "PBKDF2-SHA256", iterations: 1000, salt, iv: b64(iv), data: b64(data) };
+  assert.deepEqual(await unseal(readEnvelope(JSON.stringify(legacy)), key), { a: 1 });
+});
+
 // An in-memory stand-in for the parts of the GitHub REST API the store uses.
 // With `lag`, reads keep returning the version a write replaced for that many milliseconds.
 function fakeGitHub({ lag = 0 } = {}) {

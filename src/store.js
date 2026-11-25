@@ -4,6 +4,8 @@ import { readFile, writeFile, ensureBranch } from "./github.js";
 import { t } from "./i18n.js";
 
 const CACHE_KEY = "ht.cache.v1";
+// Every save is a commit, so edits are batched; leaving the app saves sooner.
+const SAVE_DELAY = 30_000;
 
 function getStorage(kind) {
   try {
@@ -67,6 +69,7 @@ export function createStore({ config, onChange, onStatus }) {
   let timer = 0;
   let running = false;
   let again = false;
+  let state = "off";
 
   const persist = () => write(local, CACHE_KEY, JSON.stringify(cache));
 
@@ -79,16 +82,21 @@ export function createStore({ config, onChange, onStatus }) {
     return key;
   }
 
+  function report(next, message) {
+    state = next;
+    onStatus(next, message);
+  }
+
   async function sync() {
     clearTimeout(timer);
     const cfg = config();
-    if (!cfg.repo || !cfg.token || !cfg.passphrase) return onStatus(cache.pending.length ? "local" : "off");
+    if (!cfg.repo || !cfg.token || !cfg.passphrase) return report(cache.pending.length ? "local" : "off");
     if (running) {
       again = true;
       return;
     }
     running = true;
-    onStatus("syncing");
+    report("syncing");
     try {
       for (let attempt = 0; ; attempt++) {
         let remote = await readFile(cfg);
@@ -130,11 +138,11 @@ export function createStore({ config, onChange, onStatus }) {
         view = replay(cache.base, cache.pending);
         persist();
         onChange();
-        onStatus("synced");
+        report(cache.pending.length ? "local" : "synced");
         break;
       }
     } catch (err) {
-      onStatus("error", describe(err, cfg.repo));
+      report("error", describe(err, cfg.repo));
     } finally {
       running = false;
       if (again) {
@@ -152,8 +160,9 @@ export function createStore({ config, onChange, onStatus }) {
       view = replay(cache.base, cache.pending);
       persist();
       if (!quiet) onChange();
+      if (state !== "error" && state !== "syncing") report("local");
       clearTimeout(timer);
-      timer = setTimeout(sync, 2000);
+      timer = setTimeout(sync, SAVE_DELAY);
     },
     sync,
     hasPending: () => cache.pending.length > 0,
