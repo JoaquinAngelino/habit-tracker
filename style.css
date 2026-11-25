@@ -316,6 +316,7 @@ label.item-tape:focus-within { outline: 2px solid var(--ink); outline-offset: 2p
 
 .title-input:hover { border-color: var(--muted); }
 .title-input:focus { border-color: var(--muted); background-color: var(--field); outline: none; }
+.is-closed .title-input { color: var(--muted); text-decoration: line-through; }
 
 .num-input { width: 72px; }
 .unit-input { width: 160px; }

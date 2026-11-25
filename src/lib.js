@@ -1,4 +1,5 @@
-export const TYPES = ["check", "weekly", "amount", "avoid"];
+export const TYPES = ["check", "weekly", "monthly", "amount", "avoid"];
+export const KINDS = ["do", "buy", "fix"];
 
 const DAY = 86_400_000;
 const toUtc = (iso) => Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
@@ -15,13 +16,14 @@ export function localIso(d = new Date()) {
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
-export const emptyData = () => ({ v: 1, habits: [], log: {}, goals: [] });
+export const emptyData = () => ({ v: 1, habits: [], log: {}, goals: [], tasks: [] });
 
 export function normalize(data) {
   const out = emptyData();
   if (!data || typeof data !== "object") return out;
   if (Array.isArray(data.habits)) out.habits = data.habits.filter((h) => h?.id && TYPES.includes(h.type));
   if (Array.isArray(data.goals)) out.goals = data.goals.filter((g) => g?.id && g.habitId);
+  if (Array.isArray(data.tasks)) out.tasks = data.tasks.filter((x) => x?.id);
   if (data.log && typeof data.log === "object") out.log = data.log;
   return out;
 }
@@ -35,51 +37,59 @@ export function isDone(habit, value) {
   return value > 0;
 }
 
-export function weekCount(data, habit, date) {
-  const start = weekStart(date);
+const monthStart = (iso) => `${iso.slice(0, 7)}-01`;
+
+const PERIODS = {
+  day: { start: (d) => d, next: (d) => addDays(d, 1), prev: (d) => addDays(d, -1) },
+  week: { start: weekStart, next: (d) => addDays(d, 7), prev: (d) => addDays(d, -7) },
+  month: { start: monthStart, next: (d) => monthStart(addDays(d, 32)), prev: (d) => monthStart(addDays(d, -1)) },
+};
+
+export const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
+
+// Days with something logged in the week or month that holds `date`.
+export function periodCount(data, habit, date) {
+  const p = PERIODS[periodOf(habit)];
+  const start = p.start(date);
   let n = 0;
-  for (let i = 0; i < 7; i++) if (entry(data, habit.id, addDays(start, i)) > 0) n++;
+  for (let d = start; d < p.next(start); d = addDays(d, 1)) if (entry(data, habit.id, d) > 0) n++;
   return n;
 }
 
-// Weekly habits are measured in weeks (keyed by their Monday), the rest in days.
+// Weekly and monthly habits are measured per period, keyed by its first day; the rest per day.
 function units(habit, from, to) {
-  const weekly = habit.type === "weekly";
-  return {
-    step: weekly ? 7 : 1,
-    first: weekly ? weekStart(later(from, habit.start)) : later(from, habit.start),
-    last: weekly ? weekStart(to) : to,
-  };
+  const p = PERIODS[periodOf(habit)];
+  return { p, first: p.start(later(from, habit.start)), last: p.start(to) };
 }
 
 function unitMet(data, habit, date) {
-  if (habit.type === "weekly") return weekCount(data, habit, date) >= (habit.target || 1);
+  if (periodOf(habit) !== "day") return periodCount(data, habit, date) >= (habit.target || 1);
   return isDone(habit, entry(data, habit.id, date));
 }
 
-// The current day or week counts only once met, so an unfinished today does not break a streak.
+// The current period counts only once met, so an unfinished today does not break a streak.
 export function streak(data, habit, today) {
-  const { step, first, last } = units(habit, habit.start, today);
+  const { p, first, last } = units(habit, habit.start, today);
   let best = 0;
   let run = 0;
-  for (let d = first; d <= last; d = addDays(d, step)) {
+  for (let d = first; d <= last; d = p.next(d)) {
     run = unitMet(data, habit, d) ? run + 1 : 0;
     best = Math.max(best, run);
   }
   let current = 0;
-  let d = unitMet(data, habit, last) ? last : addDays(last, -step);
+  let d = unitMet(data, habit, last) ? last : p.prev(last);
   while (d >= first && unitMet(data, habit, d)) {
     current++;
-    d = addDays(d, -step);
+    d = p.prev(d);
   }
-  return { current, best, unit: step === 7 ? "week" : "day" };
+  return { current, best, unit: periodOf(habit) };
 }
 
 export function rate(data, habit, today, days) {
-  const { step, first, last } = units(habit, addDays(today, -(days - 1)), today);
+  const { p, first, last } = units(habit, addDays(today, -(days - 1)), today);
   let hit = 0;
   let total = 0;
-  for (let d = first; d <= last; d = addDays(d, step)) {
+  for (let d = first; d <= last; d = p.next(d)) {
     const met = unitMet(data, habit, d);
     if (d === last && !met) continue;
     total++;
@@ -143,18 +153,33 @@ export function applyOp(data, op) {
     upsert(data.goals, op.goal);
   } else if (op.t === "delGoal") {
     data.goals = data.goals.filter((g) => g.id !== op.id);
+  } else if (op.t === "task") {
+    upsert(data.tasks, op.task);
+  } else if (op.t === "delTask") {
+    data.tasks = data.tasks.filter((x) => x.id !== op.id);
   }
   return data;
 }
 
 export const replay = (base, ops) => ops.reduce(applyOp, structuredClone(base));
 
-const opKey = (op) =>
-  op.t === "log" ? `log:${op.date}:${op.id}` : op.t === "habit" ? `habit:${op.habit.id}` : op.t === "goal" ? `goal:${op.goal.id}` : null;
+function opKey(op) {
+  if (op.t === "log") return `log:${op.date}:${op.id}`;
+  const item = op.habit ?? op.goal ?? op.task;
+  return item ? `${op.t}:${item.id}` : null;
+}
 
 // Back-to-back edits of the same thing collapse into one op, so typing a name queues a single change.
 export function queue(ops, op) {
   const last = ops.at(-1);
   const key = opKey(op);
   return last && key && opKey(last) === key ? [...ops.slice(0, -1), op] : [...ops, op];
+}
+
+// Open tasks by due date with undated ones last, done ones newest first.
+export function sortTasks(tasks) {
+  const byDue = (a, b) => (a.due || "~") < (b.due || "~") ? -1 : (a.due || "~") > (b.due || "~") ? 1 : 0;
+  const open = tasks.filter((x) => !x.done).sort(byDue);
+  const done = tasks.filter((x) => x.done).sort((a, b) => (a.done < b.done ? 1 : a.done > b.done ? -1 : 0));
+  return { open, done };
 }

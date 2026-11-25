@@ -1,5 +1,5 @@
 import { $, el, icon, iconButton } from "./ui.js";
-import { TYPES, localIso, addDays, weekStart, uid, entry, isDone, weekCount, streak, rate, level, goalProgress } from "./lib.js";
+import { TYPES, KINDS, sortTasks, localIso, addDays, weekStart, uid, entry, isDone, periodCount, streak, rate, level, goalProgress } from "./lib.js";
 import { createStore, local, session, read, write } from "./store.js";
 import { t, setLanguage, getLanguage, applyTranslations } from "./i18n.js";
 
@@ -8,11 +8,11 @@ const TOKEN_KEY = "ht.token";
 const PASS_KEY = "ht.passphrase";
 const LANG_KEY = "ht.lang";
 const DATA_PATH = "data/habits.enc";
-const VIEWS = ["today", "progress", "habits"];
-const DEFAULT_TARGET = { check: 1, weekly: 3, amount: 1, avoid: 1 };
+const VIEWS = ["today", "tasks", "progress", "habits"];
+const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, avoid: 1 };
 
 const today = () => localIso();
-const ui = { day: today(), shownToday: today(), confirmDelete: null, goalDraft: null, focus: null, status: ["off", ""], syncedAt: null };
+const ui = { day: today(), shownToday: today(), confirmDelete: null, taskFilter: "all", goalDraft: null, focus: null, status: ["off", ""], syncedAt: null };
 
 function loadSettings() {
   const defaults = { repo: "", branch: "data", remember: true };
@@ -99,6 +99,131 @@ function patchHabit(id, patch, opts) {
   if (habit) store.commit({ t: "habit", habit: { ...habit, ...patch } }, opts);
 }
 
+/* Tasks */
+
+function patchTask(id, patch, opts) {
+  const task = data().tasks.find((x) => x.id === id);
+  if (task) store.commit({ t: "task", task: { ...task, ...patch } }, opts);
+}
+
+function taskTape(task) {
+  return el("button", {
+    type: "button",
+    class: `tape item-tape${task.done ? " is-done" : ""}`,
+    "aria-pressed": String(Boolean(task.done)),
+    title: t(task.done ? "markUndone" : "markDone"),
+    "data-focus-key": `${task.id}:tape`,
+    textContent: t(task.done ? "tape_done" : "tape_todo"),
+    onclick: () => patchTask(task.id, { done: task.done ? "" : today() }),
+  });
+}
+
+function dueMark(task) {
+  if (!task.due) return null;
+  const date = fmtDay(task.due, { month: "short", day: "numeric" });
+  if (task.done || task.due > today()) return mark(t("dueOn", { date }));
+  return task.due === today() ? mark(t("dueToday"), "yellow") : mark(t("overdue", { date }), "red");
+}
+
+function dueRow(task) {
+  return el("article", { class: "item", "data-id": task.id }, [
+    el("div", { class: "item-main" }, [
+      taskTape(task),
+      el("div", { class: "item-body" }, [
+        el("p", { class: "item-title", textContent: task.title.trim() || t("untitledTask") }),
+        el("p", { class: "item-marks" }, [mark(t(`kind_${task.kind}`)), dueMark(task)]),
+      ]),
+    ]),
+  ]);
+}
+
+function taskRow(task) {
+  const title = el("input", {
+    class: "title-input",
+    value: task.title,
+    placeholder: t("taskPlaceholder"),
+    "aria-label": t("taskName"),
+    "data-focus-key": `${task.id}:title`,
+    oninput: () => patchTask(task.id, { title: title.value }, { quiet: true }),
+    onkeydown: (e) => e.key === "Enter" && title.blur(),
+  });
+  const kind = el(
+    "select",
+    { class: "pill-select", "aria-label": t("type"), "data-focus-key": `${task.id}:kind`, onchange: () => patchTask(task.id, { kind: kind.value }) },
+    KINDS.map((k) => el("option", { value: k, textContent: t(`kind_${k}`) })),
+  );
+  kind.value = task.kind;
+  const due = el("input", {
+    type: "date",
+    value: task.due,
+    "aria-label": t("dueDate"),
+    "data-focus-key": `${task.id}:due`,
+    onchange: () => patchTask(task.id, { due: due.value }),
+  });
+  return el("article", { class: `item${task.done ? " is-closed" : ""}`, "data-id": task.id }, [
+    el("div", { class: "item-main" }, [
+      taskTape(task),
+      el("div", { class: "item-body" }, [
+        title,
+        el("div", { class: "item-meta" }, [
+          kind,
+          el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("due") }), due]),
+          dueMark(task),
+        ]),
+      ]),
+      el("div", { class: "item-x" }, [iconButton("x", t("deleteTask"), () => store.commit({ t: "delTask", id: task.id }))]),
+    ]),
+  ]);
+}
+
+function addTask() {
+  const task = { id: uid(), title: "", kind: KINDS.includes(ui.taskFilter) ? ui.taskFilter : "do", due: "", done: "", created: today() };
+  ui.focus = `${task.id}:title`;
+  store.commit({ t: "task", task });
+}
+
+function tasksView() {
+  const shown = data().tasks.filter((x) => ui.taskFilter === "all" || x.kind === ui.taskFilter);
+  const { open, done } = sortTasks(shown);
+  const filter = el(
+    "select",
+    {
+      class: "pill-select",
+      "aria-label": t("show"),
+      "data-focus-key": "tasks:filter",
+      onchange: () => {
+        ui.taskFilter = filter.value;
+        ui.confirmDelete = null;
+        render();
+      },
+    },
+    ["all", ...KINDS].map((k) => el("option", { value: k, textContent: t(k === "all" ? "filter_all" : `kind_${k}`) })),
+  );
+  filter.value = ui.taskFilter;
+  const setConfirm = (id) => {
+    ui.confirmDelete = id;
+    render();
+  };
+  const clear = ui.confirmDelete === "done"
+    ? [
+      textButton(t("clearConfirm", { count: done.length }), () => {
+        ui.confirmDelete = null;
+        done.forEach((x, i) => store.commit({ t: "delTask", id: x.id }, { quiet: i < done.length - 1 }));
+      }, { danger: true }),
+      textButton(t("cancel"), () => setConfirm(null), { small: true }),
+    ]
+    : [textButton(t("clearDone"), () => setConfirm("done"), { small: true })];
+  return [
+    lane("blue", t("tasks"), {
+      count: open.length ? t("open", { count: open.length }) : "",
+      tools: [filter, textButton(t("addTask"), addTask, { plus: true })],
+      rows: open.map(taskRow),
+      empty: ui.taskFilter === "all" ? t("tasksEmpty") : t("filterEmpty"),
+    }),
+    done.length ? lane("muted", t("doneTasks"), { count: String(done.length), tools: clear, rows: done.map(taskRow) }) : null,
+  ];
+}
+
 /* Today */
 
 function todayTape(habit, day, value) {
@@ -139,7 +264,9 @@ function todayRow(habit, day) {
   const s = streak(d, habit, today());
   const marks = [mark(streakText(habit, s), s.current ? "green" : null)];
   if (s.best > s.current) marks.push(mark(t("best", { units: units(s.best, s.unit) })));
-  if (habit.type === "weekly") marks.push(mark(t("thisWeek", { count: weekCount(d, habit, day), target: habit.target })));
+  if (habit.type === "weekly" || habit.type === "monthly") {
+    marks.push(mark(t(habit.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, habit, day), target: habit.target })));
+  }
   if (habit.type === "amount" && habit.unit.trim()) marks.push(mark(habit.unit.trim()));
   const stepper = habit.type === "amount"
     ? el("div", { class: "item-actions" }, [
@@ -157,6 +284,18 @@ function todayRow(habit, day) {
       stepper,
     ]),
   ]);
+}
+
+// Tasks due by today, kept for the rest of the day once checked off.
+function dueLane(day) {
+  const now = today();
+  if (day !== now) return null;
+  const { open, done } = sortTasks(data().tasks.filter((x) => x.due && x.due <= now && (!x.done || x.done === now)));
+  if (!open.length && !done.length) return null;
+  return lane("blue", t("tasksDue"), {
+    count: t("doneCount", { done: done.length, total: open.length + done.length }),
+    rows: [...open, ...done].map(dueRow),
+  });
 }
 
 function todayView() {
@@ -179,6 +318,7 @@ function todayView() {
       rows: habits.map((h) => todayRow(h, day)),
       empty: activeHabits().length ? t("noneStarted") : firstHabitLink(),
     }),
+    dueLane(day),
   ];
 }
 
@@ -316,6 +456,7 @@ function statsRow(habit) {
   const s = streak(d, habit, now);
   let kind = t(`type_${habit.type}`);
   if (habit.type === "weekly") kind += ` · ${t("perWeek", { count: habit.target })}`;
+  if (habit.type === "monthly") kind += ` · ${t("perMonth", { count: habit.target })}`;
   if (habit.type === "amount") kind += ` · ${t("perDayUnit", { count: num(habit.target), unit: habit.unit.trim() })}`;
   return el("article", { class: "item", "data-id": habit.id }, [
     el("div", { class: "item-main" }, [
@@ -386,7 +527,7 @@ function editRow(habit) {
   );
   type.value = habit.type;
   const fields = [type];
-  if (habit.type === "weekly" || habit.type === "amount") {
+  if (habit.type !== "check" && habit.type !== "avoid") {
     const target = el("input", {
       type: "number",
       class: "num-input",
@@ -398,7 +539,7 @@ function editRow(habit) {
       "data-focus-key": `${habit.id}:target`,
       onchange: () => patch({ target: Number(target.value) > 0 ? Number(target.value) : 1 }),
     });
-    fields.push(el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: t(habit.type === "weekly" ? "timesWeek" : "aDay") })]));
+    fields.push(el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: t({ weekly: "timesWeek", monthly: "timesMonth", amount: "aDay" }[habit.type]) })]));
   }
   if (habit.type === "amount") {
     const unit = el("input", {
@@ -477,7 +618,7 @@ function render() {
   if (!jump && active?.selectionStart != null) selection = [active.selectionStart, active.selectionEnd];
   ui.focus = null;
 
-  const builders = { today: todayView, progress: progressView, habits: habitsView };
+  const builders = { today: todayView, tasks: tasksView, progress: progressView, habits: habitsView };
   $("#view").replaceChildren(...builders[view]().filter(Boolean));
   for (const wrap of document.querySelectorAll(".heatmap-wrap")) wrap.scrollLeft = wrap.scrollWidth;
 
