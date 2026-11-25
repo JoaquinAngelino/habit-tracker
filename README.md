@@ -7,8 +7,10 @@ In English and Spanish (picked from the browser, switchable in the top bar), and
 ## Habits
 
 - **Daily**: done or not, every day.
-- **Weekly**: N days a week; the streak counts weeks that hit the target.
-- **Monthly**: N days a month; the streak counts months that hit the target.
+- **Weekly**: N times a week; the streak counts weeks that hit the target.
+- **Monthly**: N times a month; the streak counts months that hit the target.
+
+For amounts, weekly and monthly habits, **+** and **−** log more than once a day.
 - **Amount**: a number toward a daily target, like 8 glasses or 20 pages.
 - **Avoid**: log a slip when it happens; every other day counts as clean.
 

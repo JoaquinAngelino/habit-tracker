@@ -253,7 +253,7 @@ function todayTape(habit, day, value) {
     "aria-pressed": String(avoid ? slipped : done),
     title: t(avoid ? (slipped ? "undoSlip" : "logSlip") : done ? "markUndone" : "markDone"),
     "data-focus-key": `${habit.id}:tape`,
-    textContent: t(avoid ? (slipped ? "tape_slipped" : "tape_clean") : done ? "tape_done" : "tape_todo"),
+    textContent: t(avoid ? (slipped ? "tape_slipped" : "tape_clean") : done ? "tape_done" : "tape_todo") + (value > 1 ? ` ×${value}` : ""),
     onclick: () => setLog(habit, day, value ? 0 : 1),
   });
 }
@@ -268,7 +268,7 @@ function todayRow(habit, day) {
     marks.push(mark(t(habit.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, habit, day), target: habit.target })));
   }
   if (habit.type === "amount" && habit.unit.trim()) marks.push(mark(habit.unit.trim()));
-  const stepper = habit.type === "amount"
+  const stepper = habit.type === "amount" || habit.type === "weekly" || habit.type === "monthly"
     ? el("div", { class: "item-actions" }, [
       iconButton("minus", t("oneLess"), () => setLog(habit, day, Math.max(0, value - 1)), { disabled: !value }),
       iconButton("plus", t("oneMore"), () => setLog(habit, day, value + 1)),
@@ -431,7 +431,7 @@ const stat = (label, value) => el("div", { class: "stat" }, [el("dt", { textCont
 function cellText(habit, value, lvl) {
   if (habit.type === "amount") return t("cell_amount", { value: num(value), target: num(habit.target || 1) });
   if (habit.type === "avoid") return t(lvl < 0 ? "cell_slipped" : "cell_clean");
-  return t(value ? "cell_done" : "cell_missed");
+  return t(value ? "cell_done" : "cell_missed") + (value > 1 ? ` ×${value}` : "");
 }
 
 function heatmap(habit) {

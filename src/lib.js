@@ -47,12 +47,12 @@ const PERIODS = {
 
 export const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
 
-// Days with something logged in the week or month that holds `date`.
+// Times logged in the week or month that holds `date`; a day can count more than once.
 export function periodCount(data, habit, date) {
   const p = PERIODS[periodOf(habit)];
   const start = p.start(date);
   let n = 0;
-  for (let d = start; d < p.next(start); d = addDays(d, 1)) if (entry(data, habit.id, d) > 0) n++;
+  for (let d = start; d < p.next(start); d = addDays(d, 1)) n += entry(data, habit.id, d);
   return n;
 }
 
@@ -112,7 +112,7 @@ export function goalProgress(data, goal, habit, today) {
   let done = 0;
   for (let d = later(goal.start, habit.start); d <= end; d = addDays(d, 1)) {
     const v = entry(data, habit.id, d);
-    done += habit.type === "amount" ? v : isDone(habit, v) ? 1 : 0;
+    done += habit.type === "amount" || periodOf(habit) !== "day" ? v : isDone(habit, v) ? 1 : 0;
   }
   const span = daysBetween(goal.start, goal.deadline) + 1;
   const elapsed = Math.min(span, Math.max(0, daysBetween(goal.start, today) + 1));

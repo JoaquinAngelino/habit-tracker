@@ -131,4 +131,6 @@ test("monthly streak counts months that met the target", () => {
   data.log["2026-11-24"] = { h: 1 };
   assert.deepEqual(streak(data, books, TODAY), { current: 2, best: 2, unit: "month" });
   assert.equal(rate(data, books, TODAY, 90), 3 / 4);
+  data.log["2026-11-24"] = { h: 3 };
+  assert.equal(periodCount(data, books, TODAY), 4);
 });
