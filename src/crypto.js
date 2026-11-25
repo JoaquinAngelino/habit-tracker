@@ -1,4 +1,4 @@
-const ITERATIONS = 600_000;
+export const ITERATIONS = 600_000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 

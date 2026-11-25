@@ -1,5 +1,5 @@
 import { emptyData, normalize, replay, queue } from "./lib.js";
-import { deriveKey, seal, unseal, readEnvelope, newSalt } from "./crypto.js";
+import { deriveKey, seal, unseal, readEnvelope, newSalt, ITERATIONS } from "./crypto.js";
 import { readFile, writeFile, ensureBranch } from "./github.js";
 import { t } from "./i18n.js";
 
@@ -39,11 +39,12 @@ function loadCache() {
     return {
       base: normalize(saved.base),
       sha: saved.sha ?? null,
-      salt: saved.salt ?? null,
+      envelope: saved.envelope ?? null,
+      replaced: Array.isArray(saved.replaced) ? saved.replaced : [],
       pending: Array.isArray(saved.pending) ? saved.pending : [],
     };
   } catch {
-    return { base: emptyData(), sha: null, salt: null, pending: [] };
+    return { base: emptyData(), sha: null, envelope: null, replaced: [], pending: [] };
   }
 }
 
@@ -90,28 +91,42 @@ export function createStore({ config, onChange, onStatus }) {
     onStatus("syncing");
     try {
       for (let attempt = 0; ; attempt++) {
-        const remote = await readFile(cfg);
-        let base = cache.base;
-        let salt = cache.salt ?? newSalt();
-        let iterations;
-        if (remote) {
-          const envelope = readEnvelope(remote.text);
-          ({ salt, iterations } = envelope);
-          base = normalize(await unseal(envelope, await keyFor(cfg, salt, iterations)));
-        }
+        let remote = await readFile(cfg);
+        // For a few seconds after a save GitHub can still serve the version it replaced, or no file.
+        if (cache.envelope && (!remote || cache.replaced.includes(remote.sha))) remote = { sha: cache.sha, text: cache.envelope };
+        const envelope = remote && readEnvelope(remote.text);
+        const salt = envelope?.salt ?? newSalt();
+        const iterations = envelope?.iterations ?? ITERATIONS;
+        const key = await keyFor(cfg, salt, iterations);
+        const base = envelope ? normalize(await unseal(envelope, key)) : cache.base;
         const sent = cache.pending;
         const next = replay(base, sent);
+        const replaced = [...cache.replaced];
         let sha = remote?.sha ?? null;
+        let text = remote?.text ?? null;
         if (sent.length || (!remote && next.habits.length)) {
           if (!remote) await ensureBranch(cfg);
+          text = await seal(next, key, salt, iterations);
           try {
-            sha = await writeFile(cfg, await seal(next, await keyFor(cfg, salt, iterations), salt, iterations), sha);
+            const written = await writeFile(cfg, text, sha);
+            if (sha) replaced.push(sha);
+            sha = written;
           } catch (err) {
-            if ((err.status === 409 || err.status === 422) && attempt < 3) continue;
+            if ((err.status === 409 || err.status === 422) && attempt < 4) {
+              await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+              continue;
+            }
             throw err;
           }
         }
-        Object.assign(cache, { base: next, sha, salt, pending: cache.pending.filter((op) => !sent.includes(op)) });
+        if (cache.sha && sha !== cache.sha && !replaced.includes(cache.sha)) replaced.push(cache.sha);
+        Object.assign(cache, {
+          base: next,
+          sha,
+          envelope: text,
+          replaced: replaced.slice(-20),
+          pending: cache.pending.filter((op) => !sent.includes(op)),
+        });
         view = replay(cache.base, cache.pending);
         persist();
         onChange();

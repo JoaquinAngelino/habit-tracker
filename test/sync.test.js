@@ -13,15 +13,16 @@ test("sealed data opens with the same passphrase and fails with another", async 
 });
 
 // An in-memory stand-in for the parts of the GitHub REST API the store uses.
-function fakeGitHub() {
-  const repo = { files: new Map(), branches: new Set(["main"]), writes: 0 };
+// With `lag`, reads keep returning the version a write replaced for that many milliseconds.
+function fakeGitHub({ lag = 0 } = {}) {
+  const repo = { files: new Map(), old: new Map(), branches: new Set(["main"]), writes: 0 };
   globalThis.fetch = async (url, { method = "GET", body } = {}) => {
     const { pathname, searchParams } = new URL(url);
     const reply = (status, json) => ({ ok: status < 300, status, statusText: "", json: async () => json });
     const file = pathname.match(/^\/repos\/me\/habits\/contents\/(.+)$/);
     if (file && method === "GET") {
       const key = `${searchParams.get("ref")}:${decodeURIComponent(file[1])}`;
-      const f = repo.files.get(key);
+      const f = repo.old.has(key) && Date.now() - repo.old.get(key).at < lag ? repo.old.get(key).file : repo.files.get(key);
       return f ? reply(200, { sha: f.sha, content: btoa(f.text) }) : reply(404, { message: "Not Found" });
     }
     if (file && method === "PUT") {
@@ -31,6 +32,7 @@ function fakeGitHub() {
       const current = repo.files.get(key);
       if (current?.sha !== b.sha) return reply(409, { message: "sha mismatch" });
       const sha = `sha${++repo.writes}`;
+      repo.old.set(key, { file: current ?? null, at: Date.now() });
       repo.files.set(key, { sha, text: atob(b.content) });
       return reply(200, { content: { sha } });
     }
@@ -100,4 +102,23 @@ test("a wrong passphrase reports an error and never overwrites the file", async 
   await intruder.store.sync();
   assert.match(intruder.statuses.at(-1), /^error: Wrong passphrase/);
   assert.equal(repo.files.get("data:data/habits.enc"), before);
+});
+
+test("edits survive GitHub serving the previous version right after a save", async () => {
+  const repo = fakeGitHub({ lag: 5000 });
+  const a = device();
+  a.store.commit({ t: "habit", habit });
+  await a.store.sync();
+  for (const date of ["2026-11-22", "2026-11-23", "2026-11-24"]) {
+    a.store.commit({ t: "log", date, id: "h", v: 1 });
+    await a.store.sync();
+    assert.ok(a.store.data().log[date], `${date} kept after its own save`);
+  }
+  assert.deepEqual(Object.keys(a.store.data().log), ["2026-11-22", "2026-11-23", "2026-11-24"]);
+  assert.equal(a.statuses.at(-1), "synced");
+
+  repo.old.clear();
+  const b = device();
+  await b.store.sync();
+  assert.deepEqual(Object.keys(b.store.data().log), ["2026-11-22", "2026-11-23", "2026-11-24"]);
 });
