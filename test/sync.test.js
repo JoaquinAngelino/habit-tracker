@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deriveKey, seal, unseal, readEnvelope, newSalt } from "../src/crypto.js";
 import { createStore } from "../src/store.js";
+import worker from "../worker/src/index.js";
+import { fakeD1 } from "../worker/test/fake-d1.js";
+import { API } from "../src/server.js";
 
 test("sealed data opens with the same passphrase and fails with another", async () => {
   const salt = newSalt();
@@ -68,7 +71,7 @@ function fakeGitHub({ lag = 0 } = {}) {
 function device(passphrase = "correct horse battery staple") {
   const statuses = [];
   const store = createStore({
-    config: () => ({ repo: "me/habits", branch: "data", path: "data/habits.enc", token: "t", passphrase }),
+    config: () => ({ mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", path: "data/habits.enc", token: "t", passphrase }),
     onChange: () => {},
     onStatus: (state, message) => statuses.push(message ? `${state}: ${message}` : state),
   });
@@ -137,4 +140,89 @@ test("edits survive GitHub serving the previous version right after a save", asy
   const b = device();
   await b.store.sync();
   assert.deepEqual(Object.keys(b.store.data().log), ["2026-11-22", "2026-11-23", "2026-11-24"]);
+});
+
+// The real worker over an in-memory database, with sessions made directly instead of through Google.
+async function fakeServer() {
+  const env = { DB: fakeD1(), GOOGLE_CLIENT_ID: "test", ALLOWED_ORIGINS: "" };
+  globalThis.fetch = (url, init) => worker.fetch(new Request(url, init), env);
+  const sessionFor = async (sub) => {
+    const token = `token-${sub}-${Math.random()}`;
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
+    const hash = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+    env.DB.sql.prepare("INSERT OR IGNORE INTO users VALUES (?, ?, 0)").run(`user-${sub}`, sub);
+    env.DB.sql.prepare("INSERT INTO sessions VALUES (?, ?, ?)").run(hash, `user-${sub}`, Date.now() + 86_400_000);
+    return token;
+  };
+  return { env, sessionFor };
+}
+
+function accountDevice(session, { passphrase = "correct horse battery staple", sub = "g1" } = {}) {
+  const statuses = [];
+  const store = createStore({
+    config: () => ({ mode: "account", target: `account:${sub}`, ready: true, session, passphrase }),
+    onChange: () => {},
+    onStatus: (state, message, code) => statuses.push(code ?? (message ? `${state}: ${message}` : state)),
+  });
+  return { store, statuses };
+}
+
+test("two devices sync through the account server and merge each other's edits", async () => {
+  const server = await fakeServer();
+  assert.ok(API.startsWith("https://"));
+  const a = accountDevice(await server.sessionFor("g1"));
+  const b = accountDevice(await server.sessionFor("g1"));
+
+  a.store.commit({ t: "habit", habit });
+  a.store.commit({ t: "task", task: { id: "t", title: "Buy milk", kind: "buy", due: "", done: "", created: "2026-11-25" } });
+  await a.store.sync();
+  assert.equal(a.statuses.at(-1), "synced");
+  const stored = server.env.DB.sql.prepare("SELECT version, envelope FROM vaults").get();
+  assert.equal(stored.version, 1);
+  assert.ok(!stored.envelope.includes("Read") && !stored.envelope.includes("milk"));
+
+  await b.store.sync();
+  assert.deepEqual(b.store.data().habits, [habit]);
+
+  a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
+  b.store.commit({ t: "habit", habit: { ...habit, name: "Read fiction" } });
+  await a.store.sync();
+  await b.store.sync();
+  await a.store.sync();
+  for (const d of [a, b]) {
+    assert.equal(d.store.data().habits[0].name, "Read fiction");
+    assert.deepEqual(Object.keys(d.store.data().log), ["2026-11-24"]);
+    assert.equal(d.store.hasPending(), false);
+  }
+
+  const stranger = accountDevice(await server.sessionFor("g2"), { sub: "g2" });
+  await stranger.store.sync();
+  assert.deepEqual(stranger.store.data().habits, []);
+});
+
+test("an expired session reports signed out and keeps the edits for later", async () => {
+  const server = await fakeServer();
+  const a = accountDevice(await server.sessionFor("g1"));
+  server.env.DB.sql.exec("DELETE FROM sessions");
+  a.store.commit({ t: "habit", habit });
+  await a.store.sync();
+  assert.equal(a.statuses.at(-1), "errSignedOut");
+  assert.equal(a.store.hasPending(), true);
+});
+
+test("switching from GitHub to a new account uploads what the device already has", async () => {
+  fakeGitHub();
+  let cfg = { mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", path: "data/habits.enc", token: "t", passphrase: "pass words here" };
+  const store = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
+  store.commit({ t: "habit", habit });
+  await store.sync();
+  assert.equal(store.hasPending(), false);
+
+  const server = await fakeServer();
+  cfg = { mode: "account", target: "account:g1", ready: true, session: await server.sessionFor("g1"), passphrase: "pass words here" };
+  await store.sync();
+  assert.equal(server.env.DB.sql.prepare("SELECT version FROM vaults").get().version, 1);
+  const other = accountDevice(await server.sessionFor("g1"), { passphrase: "pass words here" });
+  await other.store.sync();
+  assert.deepEqual(other.store.data().habits, [habit]);
 });

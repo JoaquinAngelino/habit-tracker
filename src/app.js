@@ -2,25 +2,32 @@ import { $, el, icon, iconButton } from "./ui.js";
 import { TYPES, KINDS, sortTasks, localIso, addDays, weekStart, uid, entry, isDone, periodCount, streak, rate, level, goalProgress } from "./lib.js";
 import { createStore, local, session, read, write } from "./store.js";
 import { t, setLanguage, getLanguage, applyTranslations } from "./i18n.js";
+import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, credentialProfile } from "./server.js";
 
 const CONFIG_KEY = "ht.config";
 const TOKEN_KEY = "ht.token";
 const PASS_KEY = "ht.passphrase";
+const SESSION_KEY = "ht.session";
+const MODES = ["account", "github", "none"];
 const LANG_KEY = "ht.lang";
 const DATA_PATH = "data/habits.enc";
 const VIEWS = ["today", "tasks", "progress", "habits"];
 const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, avoid: 1 };
 
 const today = () => localIso();
-const ui = { day: today(), shownToday: today(), confirmDelete: null, taskFilter: "all", goalDraft: null, focus: null, status: ["off", ""], syncedAt: null };
+const ui = { day: today(), shownToday: today(), confirmDelete: null, confirmAccountDelete: false, taskFilter: "all", goalDraft: null, focus: null, status: ["off", ""], syncedAt: null };
 
 function loadSettings() {
-  const defaults = { repo: "", branch: "data", remember: true };
+  const defaults = { repo: "", branch: "data", remember: true, sub: "", email: "" };
+  let saved = {};
   try {
-    return { ...defaults, ...JSON.parse(read(local, CONFIG_KEY) ?? "{}") };
+    saved = JSON.parse(read(local, CONFIG_KEY) ?? "{}") ?? {};
   } catch {
-    return defaults;
+    /* start from the defaults */
   }
+  // Before accounts existed, a saved repository meant GitHub sync.
+  const mode = MODES.includes(saved.mode) ? saved.mode : saved.repo ? "github" : "account";
+  return { ...defaults, ...saved, mode };
 }
 
 const settings = loadSettings();
@@ -32,13 +39,20 @@ function saveSecret(key, value) {
   write(local, key, settings.remember ? value || null : null);
 }
 
-const config = () => ({
-  repo: settings.repo.trim(),
-  branch: settings.branch.trim() || "data",
-  path: DATA_PATH,
-  token: secret(TOKEN_KEY),
-  passphrase: secret(PASS_KEY),
-});
+function config() {
+  const passphrase = secret(PASS_KEY);
+  if (settings.mode === "account") {
+    const token = secret(SESSION_KEY);
+    return { mode: "account", target: `account:${settings.sub}`, session: token, passphrase, ready: Boolean(token && passphrase) };
+  }
+  if (settings.mode === "github") {
+    const repo = settings.repo.trim();
+    const branch = settings.branch.trim() || "data";
+    const token = secret(TOKEN_KEY);
+    return { mode: "github", target: `github:${repo}@${branch}`, repo, branch, path: DATA_PATH, token, passphrase, ready: Boolean(repo && token && passphrase) };
+  }
+  return { mode: "none" };
+}
 
 const store = createStore({ config, onChange: () => render(), onStatus: showStatus });
 const data = () => store.data();
@@ -644,7 +658,11 @@ function paintStatus() {
   banner.textContent = message;
 }
 
-function showStatus(state, message = "") {
+function showStatus(state, message = "", code = null) {
+  if (code === "errSignedOut") {
+    saveSecret(SESSION_KEY, "");
+    paintSettings();
+  }
   ui.status = [state, message];
   if (state === "synced") ui.syncedAt = new Date();
   paintStatus();
@@ -653,10 +671,96 @@ function showStatus(state, message = "") {
 function changeLanguage(lang) {
   write(local, LANG_KEY, setLanguage(lang));
   applyTranslations();
+  paintSettings();
   render();
   // Sync errors are worded when they happen, so a retry rewords them.
   if (ui.status[0] === "error") store.sync();
   else paintStatus();
+}
+
+/* Settings */
+
+let gis = null;
+
+function loadGoogle() {
+  gis ??= new Promise((resolve, reject) => {
+    document.head.append(el("script", { src: "https://accounts.google.com/gsi/client", async: true, onload: resolve, onerror: reject }));
+  }).then(() => window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onCredential }));
+  gis.catch(() => {
+    gis = null;
+  });
+  return gis;
+}
+
+async function renderGoogleButton() {
+  const box = $("#googleButton");
+  try {
+    await loadGoogle();
+  } catch {
+    return showStatus("error", t("errNetwork"));
+  }
+  box.replaceChildren();
+  window.google.accounts.id.renderButton(box, { theme: "outline", size: "large", text: "signin_with", width: 260, locale: getLanguage() });
+}
+
+async function onCredential({ credential }) {
+  try {
+    const { token } = await signIn(credential);
+    const { sub, email } = credentialProfile(credential);
+    Object.assign(settings, { sub, email });
+    saveSettings();
+    saveSecret(SESSION_KEY, token);
+    paintSettings();
+    if (!secret(PASS_KEY)) $("#passphrase").focus();
+    store.sync();
+  } catch (err) {
+    showStatus("error", t("errSignIn", { message: err.message }));
+  }
+}
+
+function signOutAccount() {
+  const token = secret(SESSION_KEY);
+  saveSecret(SESSION_KEY, "");
+  paintSettings();
+  store.sync();
+  if (token) signOut(token).catch(() => {});
+}
+
+async function removeAccount() {
+  ui.confirmAccountDelete = false;
+  try {
+    await deleteAccount(secret(SESSION_KEY));
+  } catch (err) {
+    paintSettings();
+    return showStatus("error", err.code ? t(err.code) : t("errNetwork"));
+  }
+  saveSecret(SESSION_KEY, "");
+  paintSettings();
+  store.sync();
+}
+
+function paintSettings() {
+  const mode = settings.mode;
+  const signedIn = Boolean(secret(SESSION_KEY));
+  $("#syncMode").value = mode;
+  $("#noneHint").hidden = mode !== "none";
+  $("#accountBlock").hidden = mode !== "account";
+  $("#githubBlock").hidden = mode !== "github";
+  $("#passphraseBlock").hidden = mode === "none";
+  $("#accountHint").hidden = signedIn;
+  $("#googleButton").hidden = signedIn;
+  $("#signedIn").hidden = !signedIn;
+  $("#signedInAs").textContent = t("signedInAs", { email: settings.email });
+  const confirm = (value) => {
+    ui.confirmAccountDelete = value;
+    paintSettings();
+  };
+  $("#deleteAccountSlot").replaceChildren(
+    ...(ui.confirmAccountDelete
+      ? [textButton(t("deleteAccountConfirm"), removeAccount, { danger: true }), textButton(t("cancel"), () => confirm(false), { small: true })]
+      : [textButton(t("deleteAccount"), () => confirm(true), { small: true })]),
+  );
+  if (mode === "account" && !signedIn) renderGoogleButton();
 }
 
 function initSettings() {
@@ -679,6 +783,13 @@ function initSettings() {
   passphrase.value = secret(PASS_KEY);
   remember.checked = settings.remember;
 
+  $("#syncMode").addEventListener("change", (e) => {
+    settings.mode = e.target.value;
+    ui.confirmAccountDelete = false;
+    saveSettings();
+    paintSettings();
+    store.sync();
+  });
   repo.addEventListener("input", () => {
     settings.repo = repo.value.trim();
     saveSettings();
@@ -692,8 +803,7 @@ function initSettings() {
   remember.addEventListener("change", () => {
     settings.remember = remember.checked;
     saveSettings();
-    saveSecret(TOKEN_KEY, token.value.trim());
-    saveSecret(PASS_KEY, passphrase.value);
+    for (const key of [TOKEN_KEY, PASS_KEY, SESSION_KEY]) saveSecret(key, secret(key));
   });
   for (const input of [repo, branch, token, passphrase]) input.addEventListener("change", () => store.sync());
   $("#syncNow").addEventListener("click", () => store.sync());
@@ -704,9 +814,10 @@ function initSettings() {
     saveSecret(PASS_KEY, "");
     store.sync();
   });
+  $("#signOut").addEventListener("click", signOutAccount);
 
-  const cfg = config();
-  setOpen(!cfg.repo || !cfg.token || !cfg.passphrase);
+  paintSettings();
+  setOpen(settings.mode !== "none" && !config().ready);
 }
 
 const lang = setLanguage(read(local, LANG_KEY) || (navigator.language?.startsWith("es") ? "es" : "en"));

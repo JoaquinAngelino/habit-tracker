@@ -1,11 +1,13 @@
 import { emptyData, normalize, replay, queue } from "./lib.js";
 import { deriveKey, seal, unseal, readEnvelope, newSalt, ITERATIONS } from "./crypto.js";
-import { readFile, writeFile, ensureBranch } from "./github.js";
+import * as github from "./github.js";
+import * as account from "./server.js";
 import { t } from "./i18n.js";
 
 const CACHE_KEY = "ht.cache.v1";
 // Every save is a commit, so edits are batched; leaving the app saves sooner.
 const SAVE_DELAY = 30_000;
+const BACKENDS = { github, account };
 
 function getStorage(kind) {
   try {
@@ -39,6 +41,7 @@ function loadCache() {
   try {
     const saved = JSON.parse(read(local, CACHE_KEY) ?? "{}") ?? {};
     return {
+      target: saved.target ?? null,
       base: normalize(saved.base),
       sha: saved.sha ?? null,
       envelope: saved.envelope ?? null,
@@ -46,13 +49,13 @@ function loadCache() {
       pending: Array.isArray(saved.pending) ? saved.pending : [],
     };
   } catch {
-    return { base: emptyData(), sha: null, envelope: null, replaced: [], pending: [] };
+    return { target: null, base: emptyData(), sha: null, envelope: null, replaced: [], pending: [] };
   }
 }
 
 function describe(err, repo) {
   if (err?.name === "OperationError") return t("errPassphrase");
-  if (err?.code) return t(err.code, { repo });
+  if (err?.code) return t(err.code, { repo, message: err.message });
   if (err?.status === 401) return t("errToken");
   if (err?.status === 403 || err?.status === 404) return t("errAccess", { message: err.message });
   if (err instanceof TypeError) return t("errNetwork");
@@ -82,26 +85,30 @@ export function createStore({ config, onChange, onStatus }) {
     return key;
   }
 
-  function report(next, message) {
+  function report(next, message, code) {
     state = next;
-    onStatus(next, message);
+    onStatus(next, message, code);
   }
 
   async function sync() {
     clearTimeout(timer);
     const cfg = config();
-    if (!cfg.repo || !cfg.token || !cfg.passphrase) return report(cache.pending.length ? "local" : "off");
+    const backend = BACKENDS[cfg.mode];
+    if (!backend || !cfg.ready) return report(cache.pending.length ? "local" : "off");
     if (running) {
       again = true;
       return;
     }
     running = true;
     report("syncing");
+    // A different repository or account: keep the local data, forget what was read from the old one.
+    if (cache.target !== cfg.target) Object.assign(cache, { target: cfg.target, sha: null, envelope: null, replaced: [] });
     try {
       for (let attempt = 0; ; attempt++) {
-        let remote = await readFile(cfg);
+        let remote = await backend.readFile(cfg);
         // For a few seconds after a save GitHub can still serve the version it replaced, or no file.
-        if (cache.envelope && (!remote || cache.replaced.includes(remote.sha))) remote = { sha: cache.sha, text: cache.envelope };
+        const stale = cfg.mode === "github" && cache.envelope && (!remote || cache.replaced.includes(remote.sha));
+        if (stale) remote = { sha: cache.sha, text: cache.envelope };
         const envelope = remote && readEnvelope(remote.text);
         const salt = envelope?.salt ?? newSalt();
         const iterations = envelope?.iterations ?? ITERATIONS;
@@ -112,11 +119,11 @@ export function createStore({ config, onChange, onStatus }) {
         const replaced = [...cache.replaced];
         let sha = remote?.sha ?? null;
         let text = remote?.text ?? null;
-        if (sent.length || (!remote && next.habits.length)) {
-          if (!remote) await ensureBranch(cfg);
+        if (sent.length || (!remote && (next.habits.length || next.tasks.length))) {
+          if (!remote) await backend.ensureBranch?.(cfg);
           text = await seal(next, key, salt, iterations);
           try {
-            const written = await writeFile(cfg, text, sha);
+            const written = await backend.writeFile(cfg, text, sha);
             if (sha) replaced.push(sha);
             sha = written;
           } catch (err) {
@@ -142,7 +149,7 @@ export function createStore({ config, onChange, onStatus }) {
         break;
       }
     } catch (err) {
-      report("error", describe(err, cfg.repo));
+      report("error", describe(err, cfg.repo), err?.code);
     } finally {
       running = false;
       if (again) {

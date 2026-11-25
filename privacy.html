@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Privacy · Habit Tracker</title>
+  <link rel="icon" href="logo.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="doc">
+    <p><a href="./">← Habit Tracker</a> · <a href="#es">Español</a></p>
+
+    <h1>Privacy policy</h1>
+    <p class="hint">Last updated November 25, 2026</p>
+
+    <p>Habit Tracker is a free habit and task tracker. It is built so that nobody but you can read your habits, including the people who run it.</p>
+
+    <h2>On your device</h2>
+    <p>Your habits, tasks and settings are saved in your browser's local storage, so the app works offline. If you turn on <strong>Remember</strong>, your sign-in, token and passphrase are kept there too. Clearing the site's data in your browser removes all of it.</p>
+
+    <h2>Signing in with Google</h2>
+    <p>When you sign in with Google, the app receives a token from Google with your account's unique ID, name and email. The server checks the token and keeps only the unique ID, to recognize your account the next time. Your name and email are not stored. The app asks Google for nothing beyond signing in: it has no access to your Gmail, Drive, contacts or any other Google data.</p>
+    <p>Habit Tracker's use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+
+    <h2>What the server stores</h2>
+    <ul>
+      <li>Your Google account's unique ID and when the account was created.</li>
+      <li>Your habits and tasks, encrypted in your browser with your passphrase before they are sent. The server never receives the passphrase and cannot decrypt them.</li>
+      <li>When your data was last saved, and a version number used to merge changes from several devices.</li>
+      <li>A scrambled (hashed) copy of each sign-in session, which expires 180 days after it was last used.</li>
+    </ul>
+
+    <h2>Syncing through GitHub instead</h2>
+    <p>If you sync through a GitHub repository, your encrypted data goes straight from your browser to that repository with your own token, under GitHub's terms. It never passes through the Habit Tracker server.</p>
+
+    <h2>Who else is involved</h2>
+    <p>The site is hosted on GitHub Pages and the server runs on Cloudflare. Like any web host, they process requests, including your IP address, under their own privacy policies. Habit Tracker has no ads, analytics, tracking cookies or third-party trackers, and never sells or shares your data.</p>
+
+    <h2>Deleting your data</h2>
+    <p><strong>Delete account</strong> in Settings removes your account, sessions and data from the server right away. You can also remove the app's access to your Google account at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>. Your data is kept until you delete it.</p>
+
+    <h2>Changes and contact</h2>
+    <p>Changes to this policy will be posted on this page with a new date. Questions can go to <a href="https://github.com/JoaquinAngelino/habit-tracker/issues">the project's issues on GitHub</a>.</p>
+
+    <hr>
+
+    <section id="es" lang="es">
+      <h1>Política de privacidad</h1>
+      <p class="hint">Última actualización: 25 de noviembre de 2026</p>
+
+      <p>Habit Tracker es un registro de hábitos y tareas gratuito. Está hecho para que nadie más que vos pueda leer tus hábitos, ni siquiera quienes lo administran.</p>
+
+      <h2>En tu dispositivo</h2>
+      <p>Tus hábitos, tareas y ajustes se guardan en el almacenamiento local del navegador, así la app funciona sin conexión. Si activás <strong>Recordar</strong>, también se guardan ahí tu sesión, token y frase. Borrar los datos del sitio en el navegador elimina todo.</p>
+
+      <h2>Iniciar sesión con Google</h2>
+      <p>Al iniciar sesión con Google, la app recibe un token de Google con el identificador único de tu cuenta, tu nombre y tu email. El servidor verifica el token y guarda solo el identificador único, para reconocer tu cuenta la próxima vez. Tu nombre y tu email no se guardan. La app no le pide a Google nada más que iniciar sesión: no tiene acceso a tu Gmail, Drive, contactos ni ningún otro dato de Google.</p>
+      <p>El uso que Habit Tracker hace de la información recibida de las APIs de Google cumple con la <a href="https://developers.google.com/terms/api-services-user-data-policy">Política de datos de usuario de los servicios de API de Google</a>, incluidos los requisitos de uso limitado.</p>
+
+      <h2>Qué guarda el servidor</h2>
+      <ul>
+        <li>El identificador único de tu cuenta de Google y cuándo se creó la cuenta.</li>
+        <li>Tus hábitos y tareas, cifrados en tu navegador con tu frase antes de enviarse. El servidor nunca recibe la frase y no puede descifrarlos.</li>
+        <li>Cuándo se guardaron tus datos por última vez, y un número de versión para combinar cambios de varios dispositivos.</li>
+        <li>Una copia codificada (hash) de cada sesión, que vence 180 días después de su último uso.</li>
+      </ul>
+
+      <h2>Sincronizar con GitHub</h2>
+      <p>Si sincronizás con un repositorio de GitHub, tus datos cifrados van directo de tu navegador a ese repositorio con tu propio token, bajo los términos de GitHub. Nunca pasan por el servidor de Habit Tracker.</p>
+
+      <h2>Quién más interviene</h2>
+      <p>El sitio está alojado en GitHub Pages y el servidor funciona en Cloudflare. Como cualquier proveedor web, procesan las solicitudes, incluida tu dirección IP, según sus propias políticas de privacidad. Habit Tracker no tiene publicidad, analíticas, cookies de seguimiento ni rastreadores de terceros, y nunca vende ni comparte tus datos.</p>
+
+      <h2>Borrar tus datos</h2>
+      <p><strong>Borrar cuenta</strong>, en Ajustes, elimina al instante tu cuenta, sesiones y datos del servidor. También podés quitarle el acceso a la app desde <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>. Tus datos se conservan hasta que los borres.</p>
+
+      <h2>Cambios y contacto</h2>
+      <p>Los cambios a esta política se publicarán en esta página con una fecha nueva. Las consultas pueden ir a <a href="https://github.com/JoaquinAngelino/habit-tracker/issues">los issues del proyecto en GitHub</a>.</p>
+    </section>
+  </main>
+</body>
+</html>

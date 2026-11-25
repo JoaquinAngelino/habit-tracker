@@ -33,23 +33,43 @@
   <section id="settings" class="settings" hidden>
     <div class="setting">
       <label class="field">
-        <span class="field-label" data-i18n="repo">Repository</span>
-        <input id="repo" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="owner/habit-tracker">
+        <span class="field-label" data-i18n="syncWith">Sync with</span>
+        <select id="syncMode">
+          <option value="account" data-i18n="mode_account">Google account</option>
+          <option value="github" data-i18n="mode_github">GitHub repository</option>
+          <option value="none" data-i18n="mode_none">This device only</option>
+        </select>
       </label>
-      <label class="field">
-        <span class="field-label" data-i18n="branch">Branch</span>
-        <input id="branch" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="data">
-      </label>
-      <p class="hint" data-i18n-html="branchHint"></p>
+      <p id="noneHint" class="hint" data-i18n="noneHint"></p>
+      <div id="accountBlock" class="setting">
+        <p id="accountHint" class="hint" data-i18n="accountHint"></p>
+        <div id="googleButton"></div>
+        <div id="signedIn" class="setting" hidden>
+          <p id="signedInAs"></p>
+          <div class="row">
+            <button id="signOut" type="button" class="btn" data-i18n="signOut">Sign out</button>
+            <span id="deleteAccountSlot" class="row"></span>
+          </div>
+        </div>
+      </div>
+      <div id="githubBlock" class="setting">
+        <label class="field">
+          <span class="field-label" data-i18n="repo">Repository</span>
+          <input id="repo" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="owner/habit-tracker">
+        </label>
+        <label class="field">
+          <span class="field-label" data-i18n="branch">Branch</span>
+          <input id="branch" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="data">
+        </label>
+        <p class="hint" data-i18n-html="branchHint"></p>
+        <label class="field">
+          <span class="field-label" data-i18n="token">GitHub token</span>
+          <input id="token" type="password" autocomplete="off" spellcheck="false">
+        </label>
+        <p class="hint" data-i18n-html="tokenHint"></p>
+      </div>
     </div>
-    <div class="setting">
-      <label class="field">
-        <span class="field-label" data-i18n="token">GitHub token</span>
-        <input id="token" type="password" autocomplete="off" spellcheck="false">
-      </label>
-      <p class="hint" data-i18n-html="tokenHint"></p>
-    </div>
-    <div class="setting">
+    <div id="passphraseBlock" class="setting">
       <label class="field">
         <span class="field-label" data-i18n="passphrase">Passphrase</span>
         <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
@@ -57,16 +77,17 @@
       <p class="hint" data-i18n-html="passphraseHint"></p>
       <label class="check">
         <input id="remember" type="checkbox">
-        <span data-i18n="remember">Remember token and passphrase on this device</span>
+        <span data-i18n="remember">Remember sign-in and passphrase on this device</span>
       </label>
       <div class="row">
         <button id="syncNow" type="button" class="btn" data-i18n="syncNow">Sync now</button>
-        <button id="forget" type="button" class="btn-text btn-small" data-i18n="forget">Forget token and passphrase</button>
+        <button id="forget" type="button" class="btn-text btn-small" data-i18n="forget">Forget passphrase</button>
       </div>
     </div>
   </section>
 
   <div id="banner" class="banner" role="alert" hidden></div>
   <main id="view" class="work"></main>
+  <footer class="footer"><a href="privacy.html" data-i18n="privacy">Privacy</a> · <a href="terms.html" data-i18n="terms">Terms</a></footer>
 </body>
 </html>

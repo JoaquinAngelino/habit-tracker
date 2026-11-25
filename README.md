@@ -22,19 +22,48 @@ One-off things to do, buy or fix, with an optional due date. Tasks due today or 
 
 ## Storage
 
-Everything saves in the browser first and works offline. With a repository, token and passphrase in **Settings**, it also syncs to `data/habits.enc` on the `data` branch of that repository, so every device you set up sees the same habits. The branch is created on first save and keeps data commits off the branch the site deploys from.
+Everything saves in the browser first and works offline. **Settings → Sync with** picks where it also syncs, so every device you set up sees the same habits:
 
-The file is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent. The repository is public, so:
+- **Google account**: sign in with Google and your data syncs through the Habit Tracker server (see [Server](#server)).
+- **GitHub repository**: syncs to `data/habits.enc` on the `data` branch of a repository you own, with your own token.
+- **This device only**: no sync.
 
-- Anyone can download the file and try passphrases offline. Use four or more random words.
-- Commit times are visible, though not what changed.
-- A lost passphrase cannot be recovered, and neither can the data.
+Either way the data is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent, so neither the server nor GitHub can read it. Use the same passphrase on every device. A lost passphrase cannot be recovered, and neither can the data.
 
-Changes save to the repository 30 seconds after your last edit, when you leave the app, or with **Sync now**; every save is a commit, so batching keeps the branch history small. Each sync reads the file, replays your unsynced edits on top and writes it back, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced.
+Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Each sync reads the stored copy, replays your unsynced edits on top and writes it back only if nobody saved in between, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced. Switching to an empty account or repository uploads what the device already has.
 
-## Token
+### GitHub
 
-Create a fine-grained token limited to this repository with **Contents: Read and write**. It is sent only to `api.github.com`. With **Remember** on, the token and passphrase stay in `localStorage`, which every GitHub Pages site under the same account can read; turn it off to keep them only until the tab closes.
+The `data` branch is created on first save and keeps data commits off the branch the site deploys from. Every save is a commit. The repository can be private; if it is public, anyone can download the file and try passphrases offline (use four or more random words), and commit times are visible.
+
+Create a fine-grained token limited to that repository with **Contents: Read and write**. It is sent only to `api.github.com`.
+
+### Remember
+
+With **Remember** on, the passphrase, sign-in and token stay in `localStorage`, which every GitHub Pages site under the same account can read; turn it off to keep them only until the tab closes.
+
+## Server
+
+`worker/` is a Cloudflare Worker with a D1 database behind **Sync with → Google account**. It stores each account's Google user ID and the same encrypted file, so it cannot read anyone's habits.
+
+| Request | Does |
+| --- | --- |
+| `POST /session` | Trades a Google sign-in for a session token (180 days, renewed while used) |
+| `DELETE /session` | Signs out |
+| `GET /vault` | Returns the encrypted file and its version |
+| `PUT /vault` | Saves it if the version still matches, `409` otherwise |
+| `DELETE /account` | Deletes the account and its data |
+
+Deploy, from `worker/`:
+
+```sh
+npx wrangler login
+npx wrangler d1 create habit-tracker --location enam   # put the printed database_id in wrangler.toml
+npx wrangler d1 migrations apply habit-tracker --remote
+npx wrangler deploy                                     # after setting GOOGLE_CLIENT_ID in wrangler.toml
+```
+
+Run it locally with `npx wrangler d1 migrations apply habit-tracker --local` and `npx wrangler dev`.
 
 ## Develop
 
