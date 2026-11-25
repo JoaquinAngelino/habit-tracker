@@ -12,6 +12,8 @@ const SYNCED_KEY = "synced";
 const PENDING_KEY = "ht.pending.v1";
 // Every save is a commit, so edits are batched; leaving the app saves sooner.
 const SAVE_DELAY = 30_000;
+// Phones show and hide the app constantly; checking for other devices' changes on each return would use most of the server's requests.
+const REFRESH_AFTER = 120_000;
 const BACKENDS = { github, account };
 
 function getStorage(kind) {
@@ -105,6 +107,7 @@ export function createStore({ config, onChange, onStatus }) {
   let again = false;
   let state = "off";
   let epoch = 0;
+  let checkedAt = 0;
 
   // Saves run in order. The synced copy goes first: if the page dies between the two writes, edits are replayed again, never lost.
   const queueSave = (step) => (saving = saving.then(step).catch(() => false));
@@ -230,6 +233,7 @@ export function createStore({ config, onChange, onStatus }) {
         view = replay(cache.base, cache.pending);
         await persist();
         onChange();
+        checkedAt = Date.now();
         report(cache.pending.length ? "local" : "synced");
         break;
       }
@@ -252,6 +256,10 @@ export function createStore({ config, onChange, onStatus }) {
       timer = setTimeout(sync, SAVE_DELAY);
     },
     sync,
+    // Syncs unless nothing is waiting to be saved and the last check is recent.
+    refresh(now = Date.now()) {
+      return cache.pending.length || now - checkedAt >= REFRESH_AFTER ? sync() : Promise.resolve();
+    },
     // Resolves once the device copy has loaded; render after it.
     ready,
     hasPending: () => cache.pending.length > 0,

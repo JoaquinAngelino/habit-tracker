@@ -30,7 +30,7 @@ Everything saves in the browser first, compressed in IndexedDB, and works offlin
 
 Either way the data is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent, so neither the server nor GitHub can read it. Use the same passphrase on every device. A lost passphrase cannot be recovered, and neither can the data.
 
-Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Each sync reads the stored copy, replays your unsynced edits on top and writes it back only if nobody saved in between, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced. Switching to another account or repository merges what the device already has into it.
+Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Changes from other devices arrive when the app opens, when you come back to it after 2 minutes or more, or with **Sync now**. Each sync reads the stored copy, replays your unsynced edits on top and writes it back only if nobody saved in between, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced. Switching to another account or repository merges what the device already has into it.
 
 ### GitHub
 

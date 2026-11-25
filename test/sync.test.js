@@ -302,3 +302,22 @@ test("saving edits takes one request, and checking for news downloads nothing wh
   assert.deepEqual(Object.keys(b.store.data().log), ["2026-11-24", "2026-11-25"]);
   globalThis.fetch = real;
 });
+
+test("coming back to the app checks the server only when the last check is a few minutes old or edits wait", async () => {
+  const server = await fakeServer();
+  const a = accountDevice(await server.sessionFor("g1"));
+  await a.store.sync();
+  const real = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = (url, init) => (requests++, real(url, init));
+
+  await a.store.refresh();
+  assert.equal(requests, 0);
+  await a.store.refresh(Date.now() + 121_000);
+  assert.equal(requests, 1);
+  a.store.commit({ t: "habit", habit });
+  await a.store.refresh();
+  assert.ok(requests > 1);
+  assert.equal(a.store.hasPending(), false);
+  globalThis.fetch = real;
+});

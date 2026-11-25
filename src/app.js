@@ -859,7 +859,7 @@ document.addEventListener("visibilitychange", () => {
   if (ui.day === ui.shownToday) ui.day = today();
   ui.shownToday = today();
   render();
-  store.sync();
+  store.refresh();
 });
 paintStatus();
 await store.ready;
