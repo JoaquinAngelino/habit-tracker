@@ -37,6 +37,8 @@ export function write(store, key, value) {
   }
 }
 
+const emptyCache = () => ({ target: null, base: emptyData(), sha: null, envelope: null, replaced: [], pending: [] });
+
 function loadCache() {
   try {
     const saved = JSON.parse(read(local, CACHE_KEY) ?? "{}") ?? {};
@@ -49,7 +51,7 @@ function loadCache() {
       pending: Array.isArray(saved.pending) ? saved.pending : [],
     };
   } catch {
-    return { target: null, base: emptyData(), sha: null, envelope: null, replaced: [], pending: [] };
+    return emptyCache();
   }
 }
 
@@ -70,9 +72,10 @@ export function createStore({ config, onChange, onStatus }) {
   let key = null;
   let keyId = "";
   let timer = 0;
-  let running = false;
+  let running = null;
   let again = false;
   let state = "off";
+  let epoch = 0;
 
   const persist = () => write(local, CACHE_KEY, JSON.stringify(cache));
 
@@ -90,19 +93,38 @@ export function createStore({ config, onChange, onStatus }) {
     onStatus(next, message, code);
   }
 
-  async function sync() {
+  // Resolves once the local edits made so far have been pushed, or the attempt failed.
+  function sync() {
     clearTimeout(timer);
+    if (running) {
+      again = true;
+      return running;
+    }
+    running = (async () => {
+      do {
+        again = false;
+        await once();
+      } while (again);
+    })().finally(() => {
+      running = null;
+    });
+    return running;
+  }
+
+  async function once() {
     const cfg = config();
     const backend = BACKENDS[cfg.mode];
     if (!backend || !cfg.ready) return report(cache.pending.length ? "local" : "off");
-    if (running) {
-      again = true;
-      return;
-    }
-    running = true;
+    const start = epoch;
     report("syncing");
-    // A different repository or account: keep the local data, forget what was read from the old one.
-    if (cache.target !== cfg.target) Object.assign(cache, { target: cfg.target, sha: null, envelope: null, replaced: [] });
+    if (cache.target !== cfg.target) {
+      // Another person's account must never receive this device's data; a repository or a first account may.
+      const otherAccount = cache.target?.startsWith("account:") && cfg.target.startsWith("account:");
+      Object.assign(cache, otherAccount ? emptyCache() : {}, { target: cfg.target, sha: null, envelope: null, replaced: [] });
+      view = replay(cache.base, cache.pending);
+      persist();
+      if (otherAccount) onChange();
+    }
     try {
       for (let attempt = 0; ; attempt++) {
         let remote = await backend.readFile(cfg);
@@ -134,6 +156,7 @@ export function createStore({ config, onChange, onStatus }) {
             throw err;
           }
         }
+        if (start !== epoch) return;
         if (cache.sha && sha !== cache.sha && !replaced.includes(cache.sha)) replaced.push(cache.sha);
         Object.assign(cache, {
           base: next,
@@ -149,13 +172,7 @@ export function createStore({ config, onChange, onStatus }) {
         break;
       }
     } catch (err) {
-      report("error", describe(err, cfg.repo), err?.code);
-    } finally {
-      running = false;
-      if (again) {
-        again = false;
-        sync();
-      }
+      if (start === epoch) report("error", describe(err, cfg.repo), err?.code);
     }
   }
 
@@ -173,5 +190,16 @@ export function createStore({ config, onChange, onStatus }) {
     },
     sync,
     hasPending: () => cache.pending.length > 0,
+    // Drops everything this device holds; a sync still in flight is discarded when it returns.
+    reset() {
+      clearTimeout(timer);
+      epoch++;
+      Object.assign(cache, emptyCache());
+      view = replay(cache.base, cache.pending);
+      key = null;
+      keyId = "";
+      write(local, CACHE_KEY, null);
+      onChange();
+    },
   };
 }

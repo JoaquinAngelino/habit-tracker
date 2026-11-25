@@ -226,3 +226,43 @@ test("switching from GitHub to a new account uploads what the device already has
   await other.store.sync();
   assert.deepEqual(other.store.data().habits, [habit]);
 });
+
+test("signing out empties the device, and a sync already under way cannot bring the data back", async () => {
+  const server = await fakeServer();
+  const a = accountDevice(await server.sessionFor("g1"));
+  a.store.commit({ t: "habit", habit });
+  const inFlight = a.store.sync();
+  a.store.reset();
+  await inFlight;
+  assert.deepEqual(a.store.data().habits, []);
+  assert.equal(a.store.hasPending(), false);
+});
+
+test("sync resolves only after edits made during a running sync are pushed too", async () => {
+  const server = await fakeServer();
+  const a = accountDevice(await server.sessionFor("g1"));
+  a.store.commit({ t: "habit", habit });
+  a.store.sync();
+  a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
+  await a.store.sync();
+  assert.equal(a.store.hasPending(), false);
+  const b = accountDevice(await server.sessionFor("g1"));
+  await b.store.sync();
+  assert.deepEqual(Object.keys(b.store.data().log), ["2026-11-24"]);
+});
+
+test("another Google account signing in on the same device starts empty instead of receiving the data", async () => {
+  const server = await fakeServer();
+  let cfg = { mode: "account", target: "account:g1", ready: true, session: await server.sessionFor("g1"), passphrase: "pass words here" };
+  const store = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
+  store.commit({ t: "habit", habit });
+  await store.sync();
+
+  // The first session expired, so its edit could not be pushed before someone else signed in.
+  store.commit({ t: "habit", habit: { ...habit, name: "Private" } });
+  cfg = { ...cfg, target: "account:g2", session: await server.sessionFor("g2") };
+  await store.sync();
+  assert.deepEqual(store.data().habits, []);
+  assert.equal(store.hasPending(), false);
+  assert.equal(server.env.DB.sql.prepare("SELECT COUNT(*) AS n FROM vaults").get().n, 1);
+});

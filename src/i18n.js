@@ -31,6 +31,8 @@ export const STRINGS = {
     accountHint: "Sign in to keep your habits on all your devices. They are encrypted with your passphrase before they leave this one, so not even the server can read them.",
     signedInAs: "Signed in as {email}",
     signOut: "Sign out",
+    signOutHint: "Signing out removes your habits, tasks and passphrase from this device. They stay in your account.",
+    signOutDiscard: "Sign out and discard unsaved changes",
     deleteAccount: "Delete account",
     deleteAccountConfirm: "Delete account and synced data",
 
@@ -215,6 +217,8 @@ export const STRINGS = {
     accountHint: "Iniciá sesión para tener tus hábitos en todos tus dispositivos. Se cifran con tu frase antes de salir de este, así que ni el servidor puede leerlos.",
     signedInAs: "Sesión iniciada como {email}",
     signOut: "Cerrar sesión",
+    signOutHint: "Al cerrar sesión se borran de este dispositivo tus hábitos, tareas y frase. Siguen en tu cuenta.",
+    signOutDiscard: "Cerrar sesión y descartar cambios sin guardar",
     deleteAccount: "Borrar cuenta",
     deleteAccountConfirm: "Borrar cuenta y datos sincronizados",
 

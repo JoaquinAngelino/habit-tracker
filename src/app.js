@@ -15,7 +15,7 @@ const VIEWS = ["today", "tasks", "progress", "habits"];
 const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, avoid: 1 };
 
 const today = () => localIso();
-const ui = { day: today(), shownToday: today(), confirmDelete: null, confirmAccountDelete: false, taskFilter: "all", goalDraft: null, focus: null, status: ["off", ""], syncedAt: null };
+const ui = { day: today(), shownToday: today(), confirmDelete: null, confirmAccountDelete: false, confirmSignOut: false, taskFilter: "all", goalDraft: null, focus: null, status: ["off", ""], syncedAt: null };
 
 function loadSettings() {
   const defaults = { repo: "", branch: "data", remember: true, sub: "", email: "" };
@@ -718,12 +718,30 @@ async function onCredential({ credential }) {
   }
 }
 
-function signOutAccount() {
+async function signOutAccount() {
+  if (store.hasPending() && !ui.confirmSignOut) {
+    await store.sync();
+    if (store.hasPending()) {
+      ui.confirmSignOut = true;
+      return paintSettings();
+    }
+  }
   const token = secret(SESSION_KEY);
+  forgetDevice();
+  if (token) signOut(token).catch(() => {});
+}
+
+// Leaves nothing of the account on this device: data, passphrase and sign-in.
+function forgetDevice() {
+  Object.assign(ui, { confirmAccountDelete: false, confirmSignOut: false });
+  store.reset();
   saveSecret(SESSION_KEY, "");
+  saveSecret(PASS_KEY, "");
+  $("#passphrase").value = "";
+  Object.assign(settings, { sub: "", email: "" });
+  saveSettings();
   paintSettings();
   store.sync();
-  if (token) signOut(token).catch(() => {});
 }
 
 async function removeAccount() {
@@ -734,9 +752,7 @@ async function removeAccount() {
     paintSettings();
     return showStatus("error", err.code ? t(err.code) : t("errNetwork"));
   }
-  saveSecret(SESSION_KEY, "");
-  paintSettings();
-  store.sync();
+  forgetDevice();
 }
 
 function paintSettings() {
@@ -751,14 +767,20 @@ function paintSettings() {
   $("#googleButton").hidden = signedIn;
   $("#signedIn").hidden = !signedIn;
   $("#signedInAs").textContent = t("signedInAs", { email: settings.email });
-  const confirm = (value) => {
-    ui.confirmAccountDelete = value;
+  const confirm = (patch) => {
+    Object.assign(ui, { confirmAccountDelete: false, confirmSignOut: false }, patch);
     paintSettings();
   };
-  $("#deleteAccountSlot").replaceChildren(
-    ...(ui.confirmAccountDelete
-      ? [textButton(t("deleteAccountConfirm"), removeAccount, { danger: true }), textButton(t("cancel"), () => confirm(false), { small: true })]
-      : [textButton(t("deleteAccount"), () => confirm(true), { small: true })]),
+  const cancel = textButton(t("cancel"), () => confirm(), { small: true });
+  $("#accountActions").replaceChildren(
+    ...(ui.confirmSignOut
+      ? [textButton(t("signOutDiscard"), signOutAccount, { danger: true }), cancel]
+      : ui.confirmAccountDelete
+        ? [textButton(t("deleteAccountConfirm"), removeAccount, { danger: true }), cancel]
+        : [
+            el("button", { type: "button", class: "btn", textContent: t("signOut"), onclick: signOutAccount }),
+            textButton(t("deleteAccount"), () => confirm({ confirmAccountDelete: true }), { small: true }),
+          ]),
   );
   if (mode === "account" && !signedIn) renderGoogleButton();
 }
@@ -785,7 +807,7 @@ function initSettings() {
 
   $("#syncMode").addEventListener("change", (e) => {
     settings.mode = e.target.value;
-    ui.confirmAccountDelete = false;
+    Object.assign(ui, { confirmAccountDelete: false, confirmSignOut: false });
     saveSettings();
     paintSettings();
     store.sync();
@@ -814,7 +836,6 @@ function initSettings() {
     saveSecret(PASS_KEY, "");
     store.sync();
   });
-  $("#signOut").addEventListener("click", signOutAccount);
 
   paintSettings();
   setOpen(settings.mode !== "none" && !config().ready);
