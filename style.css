@@ -157,6 +157,8 @@ code { font: 0.92em var(--font-mono); }
 .setting { display: grid; gap: 10px; align-content: start; }
 .setting input:not([type="checkbox"]) { width: 100%; }
 #googleButton { justify-self: start; min-height: 44px; }
+/* Google's frame is a light page; matching its scheme keeps Chrome from painting it white in dark mode. */
+#googleButton iframe { color-scheme: light; }
 
 .banner {
   max-width: 1040px;
