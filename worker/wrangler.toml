@@ -1,0 +1,14 @@
+name = "habit-tracker"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+# The OAuth client ID from Google Cloud. It is public: it ships in the page too.
+GOOGLE_CLIENT_ID = "657713120724-h1fovv0r8vjtf539cjmrvlo28ook5tf7.apps.googleusercontent.com"
+ALLOWED_ORIGINS = "https://joaquinangelino.github.io,http://localhost:8765"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "habit-tracker"
+database_id = "798807b9-a8da-4c81-aef3-7a9580056532"
+migrations_dir = "migrations"
