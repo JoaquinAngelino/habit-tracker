@@ -2,21 +2,27 @@ export const ITERATIONS = 600_000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const toB64 = (bytes) => {
+// Format 3 layout: format byte, iterations (uint32), 16-byte salt, 12-byte IV, then AES-GCM over gzipped JSON.
+const FORMAT = 3;
+const HEADER = 1 + 4 + 16 + 12;
+
+export const toB64 = (bytes) => {
   let s = "";
   for (const b of bytes) s += String.fromCharCode(b);
   return btoa(s);
 };
-const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+export const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 const pipe = async (bytes, stream) => new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+export const packJson = (value) => pipe(encoder.encode(JSON.stringify(value)), new CompressionStream("gzip"));
+export const unpackJson = async (bytes) => JSON.parse(decoder.decode(await pipe(bytes, new DecompressionStream("gzip"))));
 
-export const newSalt = () => toB64(crypto.getRandomValues(new Uint8Array(16)));
+export const newSalt = () => crypto.getRandomValues(new Uint8Array(16));
 
 export async function deriveKey(passphrase, salt, iterations = ITERATIONS) {
   const base = await crypto.subtle.importKey("raw", encoder.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", hash: "SHA-256", salt: fromB64(salt), iterations },
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations },
     base,
     { name: "AES-GCM", length: 256 },
     false,
@@ -26,22 +32,38 @@ export async function deriveKey(passphrase, salt, iterations = ITERATIONS) {
 
 export async function seal(value, key, salt, iterations = ITERATIONS) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  // Compressed before encrypting, since ciphertext does not compress. Version 1 files are not compressed.
-  const plain = await pipe(encoder.encode(JSON.stringify(value)), new CompressionStream("gzip"));
-  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain);
-  const envelope = { v: 2, kdf: "PBKDF2-SHA256", iterations, salt, iv: toB64(iv), data: toB64(new Uint8Array(data)) };
-  return `${JSON.stringify(envelope, null, 2)}\n`;
+  // Compressed before encrypting, since ciphertext does not compress.
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, await packJson(value)));
+  const out = new Uint8Array(HEADER + data.length);
+  out[0] = FORMAT;
+  new DataView(out.buffer).setUint32(1, iterations);
+  out.set(salt, 5);
+  out.set(iv, 21);
+  out.set(data, HEADER);
+  return out;
 }
 
-export function readEnvelope(text) {
-  const envelope = JSON.parse(text);
-  if (![1, 2].includes(envelope?.v) || envelope.kdf !== "PBKDF2-SHA256" || !envelope.salt || !envelope.iv || !envelope.data) {
-    throw Object.assign(new Error("Unrecognized data file format."), { code: "errFormat" });
+const unrecognized = () => Object.assign(new Error("Unrecognized data file format."), { code: "errFormat" });
+
+export function readEnvelope(bytes) {
+  // Formats 1 and 2 were JSON text with base64 fields; GitHub branches may still hold them.
+  if (bytes[0] === 0x7b) {
+    let e;
+    try {
+      e = JSON.parse(decoder.decode(bytes));
+    } catch {
+      throw unrecognized();
+    }
+    if (![1, 2].includes(e?.v) || e.kdf !== "PBKDF2-SHA256" || !e.salt || !e.iv || !e.data) throw unrecognized();
+    return { v: e.v, iterations: e.iterations, salt: fromB64(e.salt), iv: fromB64(e.iv), data: fromB64(e.data) };
   }
-  return envelope;
+  if (bytes[0] !== FORMAT || bytes.length <= HEADER) throw unrecognized();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { v: FORMAT, iterations: view.getUint32(1), salt: bytes.slice(5, 21), iv: bytes.slice(21, HEADER), data: bytes.slice(HEADER) };
 }
 
 export async function unseal(envelope, key) {
-  const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromB64(envelope.iv) }, key, fromB64(envelope.data)));
-  return JSON.parse(decoder.decode(envelope.v === 1 ? plain : await pipe(plain, new DecompressionStream("gzip"))));
+  const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: envelope.iv }, key, envelope.data));
+  // Format 1 was not compressed.
+  return envelope.v === 1 ? JSON.parse(decoder.decode(plain)) : unpackJson(plain);
 }

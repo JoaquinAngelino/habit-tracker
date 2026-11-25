@@ -862,5 +862,6 @@ document.addEventListener("visibilitychange", () => {
   store.sync();
 });
 paintStatus();
+await store.ready;
 render();
 store.sync();

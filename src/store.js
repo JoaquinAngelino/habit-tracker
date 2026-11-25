@@ -1,10 +1,15 @@
-import { emptyData, normalize, replay, queue } from "./lib.js";
-import { deriveKey, seal, unseal, readEnvelope, newSalt, ITERATIONS } from "./crypto.js";
+import { emptyData, normalize, replay, queue, applyOp, toOps } from "./lib.js";
+import { deriveKey, seal, unseal, readEnvelope, newSalt, packJson, unpackJson, ITERATIONS } from "./crypto.js";
+import * as idb from "./idb.js";
 import * as github from "./github.js";
 import * as account from "./server.js";
 import { t } from "./i18n.js";
 
-const CACHE_KEY = "ht.cache.v1";
+// The synced copy lives compressed in IndexedDB, which has room for years of data; earlier versions kept it here.
+const LEGACY_CACHE_KEY = "ht.cache.v1";
+const SYNCED_KEY = "synced";
+// The short list of unsynced edits stays in localStorage, which saves synchronously on every edit.
+const PENDING_KEY = "ht.pending.v1";
 // Every save is a commit, so edits are batched; leaving the app saves sooner.
 const SAVE_DELAY = 30_000;
 const BACKENDS = { github, account };
@@ -39,20 +44,42 @@ export function write(store, key, value) {
 
 const emptyCache = () => ({ target: null, base: emptyData(), sha: null, envelope: null, replaced: [], pending: [] });
 
-function loadCache() {
+function legacyCache() {
   try {
-    const saved = JSON.parse(read(local, CACHE_KEY) ?? "{}") ?? {};
-    return {
-      target: saved.target ?? null,
-      base: normalize(saved.base),
-      sha: saved.sha ?? null,
-      envelope: saved.envelope ?? null,
-      replaced: Array.isArray(saved.replaced) ? saved.replaced : [],
-      pending: Array.isArray(saved.pending) ? saved.pending : [],
-    };
+    return JSON.parse(read(local, LEGACY_CACHE_KEY)) ?? null;
   } catch {
-    return emptyCache();
+    return null;
   }
+}
+
+function loadPending() {
+  try {
+    const pending = JSON.parse(read(local, PENDING_KEY));
+    if (Array.isArray(pending)) return pending;
+  } catch {
+    /* fall back to the copy saved with the legacy cache */
+  }
+  const legacy = legacyCache();
+  return Array.isArray(legacy?.pending) ? legacy.pending : [];
+}
+
+async function loadSynced() {
+  try {
+    const saved = await idb.get(SYNCED_KEY);
+    if (saved) return { target: saved.target, sha: saved.sha, envelope: saved.envelope, replaced: saved.replaced, base: normalize(await unpackJson(saved.base)) };
+  } catch {
+    /* an unreadable copy: the next sync fetches it again */
+  }
+  const legacy = legacyCache();
+  if (!legacy) return null;
+  return {
+    target: legacy.target ?? null,
+    sha: legacy.sha ?? null,
+    envelope: legacy.envelope ? new TextEncoder().encode(legacy.envelope) : null,
+    replaced: Array.isArray(legacy.replaced) ? legacy.replaced : [],
+    base: normalize(legacy.base),
+    legacy: true,
+  };
 }
 
 function describe(err, repo) {
@@ -67,8 +94,10 @@ function describe(err, repo) {
 // The local copy is the last synced file plus the edits not yet pushed. Every sync re-reads the
 // file and replays those edits on top, so changes made on another device are kept.
 export function createStore({ config, onChange, onStatus }) {
-  const cache = loadCache();
+  const cache = { ...emptyCache(), pending: loadPending() };
   let view = replay(cache.base, cache.pending);
+  let saving = Promise.resolve();
+  let persistent = false;
   let key = null;
   let keyId = "";
   let timer = 0;
@@ -77,7 +106,27 @@ export function createStore({ config, onChange, onStatus }) {
   let state = "off";
   let epoch = 0;
 
-  const persist = () => write(local, CACHE_KEY, JSON.stringify(cache));
+  // Saves run in order. The synced copy goes first: if the page dies between the two writes, edits are replayed again, never lost.
+  const queueSave = (step) => (saving = saving.then(step).catch(() => false));
+  const savePending = () => queueSave(() => write(local, PENDING_KEY, JSON.stringify(cache.pending)));
+  function persist() {
+    const { pending, ...synced } = cache;
+    return queueSave(async () => {
+      const saved = await idb.set(SYNCED_KEY, { ...synced, base: await packJson(synced.base) });
+      write(local, PENDING_KEY, JSON.stringify(pending));
+      return saved;
+    });
+  }
+
+  const ready = (async () => {
+    persistent = await idb.usable();
+    const saved = await loadSynced();
+    if (!saved) return;
+    const { legacy, ...synced } = saved;
+    Object.assign(cache, synced);
+    view = replay(cache.base, cache.pending);
+    if (legacy && (await persist())) write(local, LEGACY_CACHE_KEY, null);
+  })();
 
   async function keyFor(cfg, salt, iterations) {
     const id = `${cfg.passphrase}\n${salt}\n${iterations}`;
@@ -101,6 +150,7 @@ export function createStore({ config, onChange, onStatus }) {
       return running;
     }
     running = (async () => {
+      await ready;
       do {
         again = false;
         await once();
@@ -114,24 +164,34 @@ export function createStore({ config, onChange, onStatus }) {
   async function once() {
     const cfg = config();
     const backend = BACKENDS[cfg.mode];
-    if (!backend || !cfg.ready) return report(cache.pending.length ? "local" : "off");
+    if (!backend || !cfg.ready) {
+      // With nowhere to sync, edits are folded into the device copy so their list stays short.
+      // A detached copy is merged as edits into whatever it syncs with next.
+      if (persistent && (cfg.mode === "none" || cache.target === null) && (cache.pending.length || cache.target)) {
+        Object.assign(cache, emptyCache(), { base: replay(cache.base, cache.pending) });
+        await persist();
+      }
+      return report(cfg.mode === "none" || cache.pending.length ? "local" : "off");
+    }
     const start = epoch;
     report("syncing");
     if (cache.target !== cfg.target) {
       // Another person's account must never receive this device's data; a repository or a first account may.
       const otherAccount = cache.target?.startsWith("account:") && cfg.target.startsWith("account:");
-      Object.assign(cache, otherAccount ? emptyCache() : {}, { target: cfg.target, sha: null, envelope: null, replaced: [] });
+      const pending = otherAccount ? [] : [...toOps(cache.base), ...cache.pending];
+      Object.assign(cache, emptyCache(), { target: cfg.target, pending });
       view = replay(cache.base, cache.pending);
       persist();
       if (otherAccount) onChange();
     }
     try {
+      const known = cache.envelope ? { sha: cache.sha, bytes: cache.envelope } : null;
+      // Edits on top of a copy already held go straight to the write; a conflict hands back the newer data.
+      let remote = backend.writesBlind && known && cache.pending.length ? known : await backend.readFile(cfg, known);
       for (let attempt = 0; ; attempt++) {
-        let remote = await backend.readFile(cfg);
         // For a few seconds after a save GitHub can still serve the version it replaced, or no file.
-        const stale = cfg.mode === "github" && cache.envelope && (!remote || cache.replaced.includes(remote.sha));
-        if (stale) remote = { sha: cache.sha, text: cache.envelope };
-        const envelope = remote && readEnvelope(remote.text);
+        if (cfg.mode === "github" && known && (!remote || cache.replaced.includes(remote.sha))) remote = known;
+        const envelope = remote && readEnvelope(remote.bytes);
         const salt = envelope?.salt ?? newSalt();
         const iterations = envelope?.iterations ?? ITERATIONS;
         const key = await keyFor(cfg, salt, iterations);
@@ -140,20 +200,22 @@ export function createStore({ config, onChange, onStatus }) {
         const next = replay(base, sent);
         const replaced = [...cache.replaced];
         let sha = remote?.sha ?? null;
-        let text = remote?.text ?? null;
+        let bytes = remote?.bytes ?? null;
         if (sent.length || (!remote && (next.habits.length || next.tasks.length))) {
           if (!remote) await backend.ensureBranch?.(cfg);
-          text = await seal(next, key, salt, iterations);
+          bytes = await seal(next, key, salt, iterations);
           try {
-            const written = await backend.writeFile(cfg, text, sha);
+            const written = await backend.writeFile(cfg, bytes, sha);
             if (sha) replaced.push(sha);
             sha = written;
           } catch (err) {
-            if ((err.status === 409 || err.status === 422) && attempt < 4) {
+            if (!(err.status === 409 || err.status === 422) || attempt >= 4) throw err;
+            if ("current" in err) remote = err.current;
+            else {
               await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
-              continue;
+              remote = await backend.readFile(cfg, known);
             }
-            throw err;
+            continue;
           }
         }
         if (start !== epoch) return;
@@ -161,12 +223,12 @@ export function createStore({ config, onChange, onStatus }) {
         Object.assign(cache, {
           base: next,
           sha,
-          envelope: text,
+          envelope: bytes,
           replaced: replaced.slice(-20),
           pending: cache.pending.filter((op) => !sent.includes(op)),
         });
         view = replay(cache.base, cache.pending);
-        persist();
+        await persist();
         onChange();
         report(cache.pending.length ? "local" : "synced");
         break;
@@ -181,14 +243,17 @@ export function createStore({ config, onChange, onStatus }) {
     // `quiet` skips the re-render, for fields still being typed in.
     commit(op, { quiet = false } = {}) {
       cache.pending = queue(cache.pending, op);
-      view = replay(cache.base, cache.pending);
-      persist();
+      // Replaying every edit on a copy of the whole history grows slow with the years; an edit only overwrites.
+      view = applyOp(view, op);
+      savePending();
       if (!quiet) onChange();
       if (state !== "error" && state !== "syncing") report("local");
       clearTimeout(timer);
       timer = setTimeout(sync, SAVE_DELAY);
     },
     sync,
+    // Resolves once the device copy has loaded; render after it.
+    ready,
     hasPending: () => cache.pending.length > 0,
     // Drops everything this device holds; a sync still in flight is discarded when it returns.
     reset() {
@@ -198,7 +263,11 @@ export function createStore({ config, onChange, onStatus }) {
       view = replay(cache.base, cache.pending);
       key = null;
       keyId = "";
-      write(local, CACHE_KEY, null);
+      queueSave(async () => {
+        await idb.remove(SYNCED_KEY);
+        write(local, LEGACY_CACHE_KEY, null);
+        write(local, PENDING_KEY, null);
+      });
       onChange();
     },
   };

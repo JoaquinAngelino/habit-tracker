@@ -1,3 +1,5 @@
+import { toB64, fromB64 } from "./crypto.js";
+
 const API = "https://api.github.com";
 
 export class GitHubError extends Error {
@@ -30,11 +32,11 @@ const contents = ({ repo, path }) => `/repos/${repo}/contents/${path.split("/").
 
 export async function readFile(cfg) {
   const file = await call(cfg.token, `${contents(cfg)}?ref=${encodeURIComponent(cfg.branch)}`);
-  return file && { sha: file.sha, text: atob(file.content.replace(/\s/g, "")) };
+  return file && { sha: file.sha, bytes: fromB64(file.content.replace(/\s/g, "")) };
 }
 
-export async function writeFile(cfg, text, sha) {
-  const body = { message: "Update habits", content: btoa(text), branch: cfg.branch, ...(sha && { sha }) };
+export async function writeFile(cfg, bytes, sha) {
+  const body = { message: "Update habits", content: toB64(bytes), branch: cfg.branch, ...(sha && { sha }) };
   return (await call(cfg.token, contents(cfg), { method: "PUT", body })).content.sha;
 }
 

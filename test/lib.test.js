@@ -134,3 +134,27 @@ test("monthly streak counts months that met the target", () => {
   data.log["2026-11-24"] = { h: 3 };
   assert.equal(periodCount(data, books, TODAY), 4);
 });
+
+test("applying each edit to the current view matches replaying the queued edits on the synced copy", () => {
+  const base = emptyData();
+  base.habits.push({ id: "a", name: "A", type: "amount", target: 2, unit: "", start: "2026-11-01", archived: false });
+  base.log["2026-11-20"] = { a: 1 };
+  const ops = [
+    { t: "log", date: "2026-11-24", id: "a", v: 1 },
+    { t: "log", date: "2026-11-24", id: "a", v: 2 },
+    { t: "habit", habit: { id: "b", name: "B", type: "check", target: 1, unit: "", start: "2026-11-01", archived: false } },
+    { t: "log", date: "2026-11-24", id: "b", v: 1 },
+    { t: "log", date: "2026-11-24", id: "a", v: 0 },
+    { t: "task", task: { id: "t", title: "x", kind: "do", due: "", done: "", created: "2026-11-24" } },
+    { t: "task", task: { id: "t", title: "xy", kind: "do", due: "", done: "", created: "2026-11-24" } },
+    { t: "delHabit", id: "a" },
+  ];
+  let pending = [];
+  let view = replay(base, []);
+  for (const op of ops) {
+    pending = queue(pending, op);
+    view = applyOp(view, op);
+    assert.deepEqual(view, replay(base, pending));
+  }
+  assert.deepEqual(base.log, { "2026-11-20": { a: 1 } });
+});

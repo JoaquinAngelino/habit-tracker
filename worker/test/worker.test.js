@@ -42,14 +42,23 @@ beforeEach(() => {
   env = { DB: fakeD1(), GOOGLE_CLIENT_ID: CLIENT_ID, ALLOWED_ORIGINS: `${ORIGIN},http://localhost:8765` };
 });
 
-async function call(method, path, { token, body, origin = ORIGIN } = {}) {
+async function call(method, path, { token, body, bytes, origin = ORIGIN } = {}) {
   const headers = { Origin: origin };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await worker.fetch(new Request(`https://api.test${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), env);
+  if (bytes !== undefined) headers["Content-Type"] = "application/octet-stream";
+  const payload = body === undefined ? bytes : JSON.stringify(body);
+  const res = await worker.fetch(new Request(`https://api.test${path}`, { method, headers, body: payload }), env);
+  const version = res.headers.get("X-Version");
+  if (res.headers.get("Content-Type") === "application/octet-stream") {
+    return { status: res.status, headers: res.headers, version, data: new TextDecoder().decode(await res.arrayBuffer()) };
+  }
   const text = await res.text();
-  return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : null };
+  return { status: res.status, headers: res.headers, version, body: text ? JSON.parse(text) : null };
 }
+
+const enc = (s) => new TextEncoder().encode(s);
+const put = (token, version, data) => call("PUT", `/vault?version=${version}`, { token, bytes: enc(data) });
 
 async function signIn(claims) {
   const res = await call("POST", "/session", { body: { credential: await idToken(claims) } });
@@ -61,22 +70,24 @@ test("a signed-in user saves and reads their encrypted data with version checks"
   const token = await signIn();
   assert.equal((await call("GET", "/vault", { token })).status, 404);
 
-  assert.deepEqual((await call("PUT", "/vault", { token, body: { version: 0, envelope: "one" } })).body, { version: 1 });
-  assert.deepEqual((await call("GET", "/vault", { token })).body, { version: 1, envelope: "one" });
+  assert.equal((await put(token, 0, "one")).version, "1");
+  const first = await call("GET", "/vault", { token });
+  assert.deepEqual([first.version, first.data], ["1", "one"]);
+  assert.equal(env.DB.sql.prepare("SELECT typeof(envelope) AS t FROM vaults").get().t, "blob");
 
   // Another device that read nothing, or an older version, is refused instead of overwriting.
-  assert.equal((await call("PUT", "/vault", { token, body: { version: 0, envelope: "stale" } })).status, 409);
-  assert.deepEqual((await call("PUT", "/vault", { token, body: { version: 1, envelope: "two" } })).body, { version: 2 });
-  assert.equal((await call("PUT", "/vault", { token, body: { version: 1, envelope: "stale" } })).status, 409);
-  assert.deepEqual((await call("GET", "/vault", { token })).body, { version: 2, envelope: "two" });
+  assert.equal((await put(token, 0, "stale")).status, 409);
+  assert.equal((await put(token, 1, "two")).version, "2");
+  assert.equal((await put(token, 1, "stale")).status, 409);
+  assert.equal((await call("GET", "/vault", { token })).data, "two");
 });
 
 test("signing in twice with the same Google account reaches the same data", async () => {
   const first = await signIn();
-  await call("PUT", "/vault", { token: first, body: { version: 0, envelope: "mine" } });
+  await put(first, 0, "mine");
   const second = await signIn();
   assert.notEqual(first, second);
-  assert.equal((await call("GET", "/vault", { token: second })).body.envelope, "mine");
+  assert.equal((await call("GET", "/vault", { token: second })).data, "mine");
 
   const other = await signIn({ sub: "google-user-2" });
   assert.equal((await call("GET", "/vault", { token: other })).status, 404);
@@ -123,7 +134,7 @@ test("an active session is extended, at most once every few days", async () => {
 
 test("deleting the account removes the user, sessions and data", async () => {
   const token = await signIn();
-  await call("PUT", "/vault", { token, body: { version: 0, envelope: "bye" } });
+  await put(token, 0, "bye");
   assert.equal((await call("DELETE", "/account", { token })).status, 204);
   for (const table of ["users", "sessions", "vaults"]) assert.equal(env.DB.sql.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
   assert.equal((await call("GET", "/vault", { token })).status, 401);
@@ -131,9 +142,10 @@ test("deleting the account removes the user, sessions and data", async () => {
 
 test("bad writes are refused", async () => {
   const token = await signIn();
-  assert.equal((await call("PUT", "/vault", { token, body: { version: "1", envelope: "x" } })).status, 400);
-  assert.equal((await call("PUT", "/vault", { token, body: { version: 0, envelope: "" } })).status, 400);
-  assert.equal((await call("PUT", "/vault", { token, body: { version: 0, envelope: "x".repeat(1_000_001) } })).status, 413);
+  assert.equal((await put(token, "x", "data")).status, 400);
+  assert.equal((await call("PUT", "/vault", { token, bytes: enc("data") })).status, 400);
+  assert.equal((await put(token, 0, "")).status, 400);
+  assert.equal((await put(token, 0, "x".repeat(1_000_001))).status, 413);
   assert.equal((await call("POST", "/vault", { token })).status, 404);
 });
 
@@ -142,6 +154,7 @@ test("only the app's own origins get CORS headers", async () => {
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers.get("Access-Control-Allow-Origin"), ORIGIN);
   assert.match(preflight.headers.get("Access-Control-Allow-Headers"), /Authorization/);
+  assert.equal(preflight.headers.get("Access-Control-Expose-Headers"), "X-Version");
 
   const local = await call("GET", "/vault", { origin: "http://localhost:8765" });
   assert.equal(local.headers.get("Access-Control-Allow-Origin"), "http://localhost:8765");
@@ -152,4 +165,17 @@ test("only the app's own origins get CORS headers", async () => {
 test("sign-in is refused until a Google client ID is configured", async () => {
   env.GOOGLE_CLIENT_ID = "";
   assert.equal((await call("POST", "/session", { body: { credential: await idToken() } })).status, 503);
+});
+
+test("a client that already has the current version gets no data back, and a conflict returns the newer data", async () => {
+  const token = await signIn();
+  await put(token, 0, "one");
+  const same = await call("GET", "/vault?have=1", { token });
+  assert.deepEqual([same.status, same.version, same.body], [204, "1", null]);
+  await put(token, 1, "two");
+  const newer = await call("GET", "/vault?have=1", { token });
+  assert.deepEqual([newer.status, newer.version, newer.data], [200, "2", "two"]);
+
+  const conflict = await put(token, 1, "stale");
+  assert.deepEqual([conflict.status, conflict.version, conflict.data], [409, "2", "two"]);
 });

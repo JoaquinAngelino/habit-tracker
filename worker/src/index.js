@@ -106,18 +106,29 @@ async function authenticate(request, env) {
   return { userId: session.user_id, hash };
 }
 
-async function readVault(env, userId) {
-  const vault = await env.DB.prepare("SELECT version, envelope FROM vaults WHERE user_id = ?").bind(userId).first();
-  return vault ? json(vault) : json({ error: "No data yet" }, 404);
+const blob = (bytes, version, status = 200) =>
+  new Response(new Uint8Array(bytes), { status, headers: { "Content-Type": "application/octet-stream", "X-Version": String(version) } });
+
+// A client that already has version `have` gets only the version back while it is still current.
+async function readVault(url, env, userId) {
+  const have = Number(url.searchParams.get("have")) || 0;
+  const vault = await env.DB.prepare("SELECT version, CASE WHEN version = ? THEN NULL ELSE envelope END AS envelope FROM vaults WHERE user_id = ?")
+    .bind(have, userId)
+    .first();
+  if (!vault) return json({ error: "No data yet" }, 404);
+  if (vault.envelope == null) return new Response(null, { status: 204, headers: { "X-Version": String(vault.version) } });
+  return blob(vault.envelope, vault.version);
 }
 
 // `version` is the one the client last read (0 for none); a write over a newer version is refused.
-async function writeVault(request, env, userId) {
-  const { version, envelope } = await readJson(request);
-  if (!Number.isInteger(version) || version < 0 || typeof envelope !== "string" || !envelope) {
-    throw new HttpError(400, "Expected a version and an envelope");
-  }
-  if (envelope.length > MAX_ENVELOPE) throw new HttpError(413, "Data is too large");
+async function writeVault(request, url, env, userId) {
+  const raw = url.searchParams.get("version") ?? "";
+  if (!/^\d+$/.test(raw)) throw new HttpError(400, "Expected a version");
+  const version = Number(raw);
+  if (Number(request.headers.get("Content-Length")) > MAX_ENVELOPE) throw new HttpError(413, "Data is too large");
+  const envelope = await request.arrayBuffer();
+  if (!envelope.byteLength) throw new HttpError(400, "Expected the encrypted data");
+  if (envelope.byteLength > MAX_ENVELOPE) throw new HttpError(413, "Data is too large");
   const now = Date.now();
   const result = version === 0
     ? await env.DB.prepare("INSERT INTO vaults (user_id, version, envelope, updated_at) VALUES (?, 1, ?, ?) ON CONFLICT (user_id) DO NOTHING")
@@ -126,8 +137,10 @@ async function writeVault(request, env, userId) {
     : await env.DB.prepare("UPDATE vaults SET version = version + 1, envelope = ?, updated_at = ? WHERE user_id = ? AND version = ?")
       .bind(envelope, now, userId, version)
       .run();
-  if (result.meta.changes !== 1) throw new HttpError(409, "The data changed since it was read");
-  return json({ version: version + 1 });
+  if (result.meta.changes === 1) return new Response(null, { status: 204, headers: { "X-Version": String(version + 1) } });
+  // The newer data comes back with the refusal, so the client can merge without another request.
+  const current = await env.DB.prepare("SELECT version, envelope FROM vaults WHERE user_id = ?").bind(userId).first();
+  return current ? blob(current.envelope, current.version, 409) : json({ error: "The data changed since it was read" }, 409);
 }
 
 async function deleteAccount(env, userId) {
@@ -140,7 +153,8 @@ async function deleteAccount(env, userId) {
 }
 
 async function route(request, env) {
-  const { pathname } = new URL(request.url);
+  const url = new URL(request.url);
+  const { pathname } = url;
   const key = `${request.method} ${pathname}`;
   if (key === "POST /session") return signIn(request, env);
   if (!["DELETE /session", "GET /vault", "PUT /vault", "DELETE /account"].includes(key)) throw new HttpError(404, "Not found");
@@ -149,8 +163,8 @@ async function route(request, env) {
     await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(hash).run();
     return new Response(null, { status: 204 });
   }
-  if (key === "GET /vault") return readVault(env, userId);
-  if (key === "PUT /vault") return writeVault(request, env, userId);
+  if (key === "GET /vault") return readVault(url, env, userId);
+  if (key === "PUT /vault") return writeVault(request, url, env, userId);
   return deleteAccount(env, userId);
 }
 
@@ -161,6 +175,7 @@ function corsHeaders(origin, env) {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Expose-Headers": "X-Version",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };

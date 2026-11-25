@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deriveKey, seal, unseal, readEnvelope, newSalt } from "../src/crypto.js";
+import { deriveKey, seal, unseal, readEnvelope, newSalt, packJson } from "../src/crypto.js";
 import { createStore } from "../src/store.js";
 import worker from "../worker/src/index.js";
 import { fakeD1 } from "../worker/test/fake-d1.js";
@@ -8,27 +8,32 @@ import { API } from "../src/server.js";
 
 test("sealed data opens with the same passphrase and fails with another", async () => {
   const salt = newSalt();
-  const text = await seal({ a: 1 }, await deriveKey("right horse", salt, 1000), salt, 1000);
-  const envelope = readEnvelope(text);
-  assert.ok(!text.includes('"a"'));
+  const bytes = await seal({ a: 1 }, await deriveKey("right horse", salt, 1000), salt, 1000);
+  assert.ok(bytes instanceof Uint8Array);
+  const envelope = readEnvelope(bytes);
+  assert.deepEqual([envelope.v, envelope.iterations], [3, 1000]);
+  assert.deepEqual(envelope.salt, salt);
   assert.deepEqual(await unseal(envelope, await deriveKey("right horse", salt, 1000)), { a: 1 });
   await assert.rejects(unseal(envelope, await deriveKey("wrong horse", salt, 1000)), { name: "OperationError" });
+  assert.throws(() => readEnvelope(new Uint8Array([9, 9, 9])), { code: "errFormat" });
 });
 
-test("files are compressed before encrypting, and uncompressed version 1 files still open", async () => {
+test("files are compressed raw bytes, and the older JSON text formats still open", async () => {
   const salt = newSalt();
   const key = await deriveKey("right horse", salt, 1000);
   const value = { log: Object.fromEntries(Array.from({ length: 365 }, (_, i) => [`2026-${i}`, { abcdefgh: 1 }])) };
-  const envelope = readEnvelope(await seal(value, key, salt, 1000));
-  assert.equal(envelope.v, 2);
-  assert.ok(atob(envelope.data).length < JSON.stringify(value).length / 5);
-  assert.deepEqual(await unseal(envelope, key), value);
+  const bytes = await seal(value, key, salt, 1000);
+  assert.ok(bytes.length < JSON.stringify(value).length / 7);
+  assert.deepEqual(await unseal(readEnvelope(bytes), key), value);
 
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode('{"a":1}'));
-  const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
-  const legacy = { v: 1, kdf: "PBKDF2-SHA256", iterations: 1000, salt, iv: b64(iv), data: b64(data) };
-  assert.deepEqual(await unseal(readEnvelope(JSON.stringify(legacy)), key), { a: 1 });
+  const b64 = (data) => btoa(String.fromCharCode(...new Uint8Array(data)));
+  const legacy = async (v, plain) => {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain);
+    return new TextEncoder().encode(JSON.stringify({ v, kdf: "PBKDF2-SHA256", iterations: 1000, salt: b64(salt), iv: b64(iv), data: b64(data) }));
+  };
+  assert.deepEqual(await unseal(readEnvelope(await legacy(1, new TextEncoder().encode('{"a":1}'))), key), { a: 1 });
+  assert.deepEqual(await unseal(readEnvelope(await legacy(2, await packJson({ a: 2 }))), key), { a: 2 });
 });
 
 // An in-memory stand-in for the parts of the GitHub REST API the store uses.
@@ -179,7 +184,8 @@ test("two devices sync through the account server and merge each other's edits",
   assert.equal(a.statuses.at(-1), "synced");
   const stored = server.env.DB.sql.prepare("SELECT version, envelope FROM vaults").get();
   assert.equal(stored.version, 1);
-  assert.ok(!stored.envelope.includes("Read") && !stored.envelope.includes("milk"));
+  const sealed = new TextDecoder().decode(stored.envelope);
+  assert.ok(stored.envelope instanceof Uint8Array && !sealed.includes("Read") && !sealed.includes("milk"));
 
   await b.store.sync();
   assert.deepEqual(b.store.data().habits, [habit]);
@@ -265,4 +271,34 @@ test("another Google account signing in on the same device starts empty instead 
   assert.deepEqual(store.data().habits, []);
   assert.equal(store.hasPending(), false);
   assert.equal(server.env.DB.sql.prepare("SELECT COUNT(*) AS n FROM vaults").get().n, 1);
+});
+
+test("saving edits takes one request, and checking for news downloads nothing when there is none", async () => {
+  const server = await fakeServer();
+  const a = accountDevice(await server.sessionFor("g1"));
+  const b = accountDevice(await server.sessionFor("g1"));
+  a.store.commit({ t: "habit", habit });
+  await a.store.sync();
+  await b.store.sync();
+
+  const real = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const res = await real(url, init);
+    seen.push(`${init.method ?? "GET"} ${res.status} ${res.headers.get("Content-Type") === "application/octet-stream" ? "data" : "-"}`);
+    return res;
+  };
+
+  a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
+  await a.store.sync();
+  assert.deepEqual(seen.splice(0), ["PUT 204 -"]);
+  await a.store.sync();
+  assert.deepEqual(seen.splice(0), ["GET 204 -"]);
+
+  // B's copy is behind: its write is refused with A's data, merged, and written again.
+  b.store.commit({ t: "log", date: "2026-11-25", id: "h", v: 1 });
+  await b.store.sync();
+  assert.deepEqual(seen.splice(0), ["PUT 409 data", "PUT 204 -"]);
+  assert.deepEqual(Object.keys(b.store.data().log), ["2026-11-24", "2026-11-25"]);
+  globalThis.fetch = real;
 });

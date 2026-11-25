@@ -22,7 +22,7 @@ One-off things to do, buy or fix, with an optional due date. Tasks due today or 
 
 ## Storage
 
-Everything saves in the browser first and works offline. **Settings → Sync with** picks where it also syncs, so every device you set up sees the same habits:
+Everything saves in the browser first, compressed in IndexedDB, and works offline. **Settings → Sync with** picks where it also syncs, so every device you set up sees the same habits:
 
 - **Google account**: sign in with Google and your data syncs through the Habit Tracker server (see [Server](#server)).
 - **GitHub repository**: syncs to `data/habits.enc` on the `data` branch of a repository you own, with your own token.
@@ -30,7 +30,7 @@ Everything saves in the browser first and works offline. **Settings → Sync wit
 
 Either way the data is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent, so neither the server nor GitHub can read it. Use the same passphrase on every device. A lost passphrase cannot be recovered, and neither can the data.
 
-Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Each sync reads the stored copy, replays your unsynced edits on top and writes it back only if nobody saved in between, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced. Switching to an empty account or repository uploads what the device already has.
+Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Each sync reads the stored copy, replays your unsynced edits on top and writes it back only if nobody saved in between, so edits from two devices merge. Edits to the same habit on the same day keep the last one synced. Switching to another account or repository merges what the device already has into it.
 
 ### GitHub
 
@@ -50,8 +50,8 @@ With **Remember** on, the passphrase, sign-in and token stay in `localStorage`, 
 | --- | --- |
 | `POST /session` | Trades a Google sign-in for a session token (180 days, renewed while used) |
 | `DELETE /session` | Signs out |
-| `GET /vault` | Returns the encrypted file and its version |
-| `PUT /vault` | Saves it if the version still matches, `409` otherwise |
+| `GET /vault?have=N` | Returns the encrypted file as raw bytes with its version in `X-Version`, or `204` while `N` is still current |
+| `PUT /vault?version=N` | Saves the bytes if `N` is still current, otherwise `409` with the newer file |
 | `DELETE /account` | Deletes the account and its data |
 
 Deploy, from `worker/`:

@@ -163,6 +163,16 @@ export function applyOp(data, op) {
 
 export const replay = (base, ops) => ops.reduce(applyOp, structuredClone(base));
 
+// Everything in `data` as edits, so replaying them merges it into other data.
+export function toOps(data) {
+  return [
+    ...data.habits.map((habit) => ({ t: "habit", habit })),
+    ...data.goals.map((goal) => ({ t: "goal", goal })),
+    ...data.tasks.map((task) => ({ t: "task", task })),
+    ...Object.entries(data.log).flatMap(([date, day]) => Object.entries(day).map(([id, v]) => ({ t: "log", date, id, v }))),
+  ];
+}
+
 function opKey(op) {
   if (op.t === "log") return `log:${op.date}:${op.id}`;
   const item = op.habit ?? op.goal ?? op.task;
