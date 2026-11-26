@@ -291,7 +291,7 @@ export function createStore({ config, onChange, onStatus }) {
   }
 
   function touch(op) {
-    const id = op.t === "log" || op.t === "delHabit" ? op.id : op.habit?.id;
+    const id = op.t === "log" || op.t === "skip" || op.t === "delHabit" ? op.id : op.habit?.id;
     if (id) touched.set(id, (touched.get(id) ?? 0) + 1);
   }
 

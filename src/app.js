@@ -1,5 +1,5 @@
 import { $, el, icon, iconButton } from "./ui.js";
-import { TYPES, KINDS, sortTasks, localIso, addDays, weekStart, uid, entry, isDone, periodCount, streak, rate, level, goalProgress } from "./lib.js";
+import { TYPES, KINDS, sortTasks, localIso, addDays, weekStart, uid, entry, isDone, periodCount, streak, rate, level, goalProgress, canSchedule, isSkipped, isOff } from "./lib.js";
 import { createStore } from "./store.js";
 import { local, session, read, write } from "./storage.js";
 import { fromB64 } from "./crypto.js";
@@ -171,6 +171,10 @@ const firstHabitLink = () => [`${t("noHabits")} `, el("a", { href: "#habits", te
 
 function setLog(habit, date, value) {
   store.commit({ t: "log", date, id: habit.id, v: value > 0 ? value : 0 });
+}
+
+function setSkip(habit, date, skipped) {
+  store.commit({ t: "skip", date, id: habit.id, v: skipped ? 1 : 0 });
 }
 
 function patchHabit(id, patch, opts) {
@@ -345,17 +349,22 @@ function todayRow(habit, day) {
     marks.push(mark(t(habit.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, habit, day), target: habit.target })));
   }
   if (habit.type === "amount" && habit.unit.trim()) marks.push(mark(habit.unit.trim()));
-  const stepper = habit.type === "amount" || habit.type === "weekly" || habit.type === "monthly"
-    ? el("div", { class: "item-actions" }, [
+  const skipped = isSkipped(d, habit.id, day);
+  if (!value && isOff(d, habit, day)) marks.push(mark(t(skipped ? "skipped" : "notScheduled")));
+  const actions = [];
+  if (habit.type === "amount" || habit.type === "weekly" || habit.type === "monthly") {
+    actions.push(
       iconButton("minus", t("oneLess"), () => setLog(habit, day, Math.max(0, value - 1)), { disabled: !value }),
       iconButton("plus", t("oneMore"), () => setLog(habit, day, value + 1)),
-    ])
-    : null;
+    );
+  }
+  if (skipped) actions.push(textButton(t("undoSkip"), () => setSkip(habit, day, false), { small: true }));
+  else if (canSchedule(habit) && !isDone(habit, value) && !isOff(d, habit, day)) actions.push(textButton(t("skip"), () => setSkip(habit, day, true), { small: true }));
   return itemRow({
     id: habit.id,
     tape: todayTape(habit, day, value),
     body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, marks)],
-    side: stepper,
+    side: actions.length ? el("div", { class: "item-actions" }, actions) : null,
   });
 }
 
@@ -375,22 +384,26 @@ function todayView() {
   const day = ui.day;
   const now = today();
   const started = activeHabits().filter((h) => h.start <= day);
-  const done = started.filter((h) => isDone(h, entry(data(), h.id, day))).length;
+  // A day off still lists the habit, apart, so it can be logged anyway; logging moves it back.
+  const off = started.filter((h) => !entry(data(), h.id, day) && isOff(data(), h, day));
+  const due = started.filter((h) => !off.includes(h));
+  const done = due.filter((h) => isDone(h, entry(data(), h.id, day))).length;
   const go = (to) => {
     ui.day = to;
     render();
   };
   return [
     lane("green", day === now ? t("today") : fmtDay(day), {
-      count: started.length ? t("doneCount", { done, total: started.length }) : "",
+      count: due.length ? t("doneCount", { done, total: due.length }) : "",
       tools: [
         day !== now ? textButton(t("backToday"), () => go(now), { small: true }) : null,
         iconButton("left", t("prevDay"), () => go(addDays(day, -1))),
         iconButton("right", t("nextDay"), () => go(addDays(day, 1)), { disabled: day >= now }),
       ],
-      rows: started.map((h) => todayRow(h, day)),
-      empty: activeHabits().length ? t("noneStarted") : firstHabitLink(),
+      rows: due.map((h) => todayRow(h, day)),
+      empty: !activeHabits().length ? firstHabitLink() : started.length ? t("allOff") : t("noneStarted"),
     }),
+    off.length ? lane("muted", t("dayOff"), { count: t("habits", { count: off.length }), rows: off.map((h) => todayRow(h, day)) }) : null,
     dueLane(day),
   ];
 }
@@ -499,6 +512,7 @@ function goalForm(choices) {
 const stat = (label, value) => el("div", { class: "stat" }, [el("dt", { textContent: label }), el("dd", { textContent: value })]);
 
 function cellText(habit, value, lvl) {
+  if (lvl === "off") return t("cell_off");
   if (habit.type === "amount") return t("cell_amount", { value: num(value), target: num(habit.target || 1) });
   if (habit.type === "avoid") return t(lvl < 0 ? "cell_slipped" : "cell_clean");
   return t(value ? "cell_done" : "cell_missed") + (value > 1 ? ` ×${value}` : "");
@@ -572,6 +586,26 @@ function addHabit() {
   store.commit({ t: "habit", habit });
 }
 
+// No days stored means every day, so picking all seven, or none, clears the list.
+function dayPicker(habit, patch) {
+  const chosen = habit.days?.length ? habit.days : [0, 1, 2, 3, 4, 5, 6];
+  const name = (i, weekday) => formatter(Intl.DateTimeFormat, { weekday }).format(new Date(2024, 0, 1 + i));
+  const toggle = (i) => {
+    const next = chosen.includes(i) ? chosen.filter((x) => x !== i) : [...chosen, i].sort();
+    patch({ days: next.length && next.length < 7 ? next : [] });
+  };
+  return el("span", { class: "days", role: "group", "aria-label": t("onDays") }, [0, 1, 2, 3, 4, 5, 6].map((i) =>
+    el("button", {
+      type: "button",
+      class: "day",
+      "aria-pressed": String(chosen.includes(i)),
+      "aria-label": name(i, "long"),
+      "data-focus-key": `${habit.id}:day${i}`,
+      textContent: name(i, "narrow"),
+      onclick: () => toggle(i),
+    })));
+}
+
 function editRow(habit) {
   const patch = (p, opts) => patchHabit(habit.id, p, opts);
   const name = el("input", {
@@ -625,6 +659,7 @@ function editRow(habit) {
     onchange: () => start.value && patch({ start: start.value }),
   });
   fields.push(el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("since") }), start]));
+  if (canSchedule(habit)) fields.push(dayPicker(habit, patch));
 
   const confirmKey = `habit:${habit.id}`;
   const actions = ui.confirm === confirmKey
@@ -898,9 +933,29 @@ function initSettings() {
     store.sync();
   });
   $("#exportData").addEventListener("click", exportData);
+  initInstall();
 
   paintSettings();
   setOpen(settings.mode !== "none" && !config().ready);
+}
+
+// Only browsers that fire beforeinstallprompt can install from a button; the rest use their own menu.
+function initInstall() {
+  const button = $("#installApp");
+  let prompt = null;
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    prompt = event;
+    button.hidden = false;
+  });
+  window.addEventListener("appinstalled", () => (button.hidden = true));
+  button.addEventListener("click", async () => {
+    if (!prompt) return;
+    prompt.prompt();
+    await prompt.userChoice;
+    prompt = null;
+    button.hidden = true;
+  });
 }
 
 const lang = setLanguage(read(local, LANG_KEY) || (navigator.language?.startsWith("es") ? "es" : "en"));

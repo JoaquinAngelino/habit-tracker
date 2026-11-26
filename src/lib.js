@@ -7,7 +7,9 @@ const fromUtc = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 export const addDays = (iso, n) => fromUtc(toUtc(iso) + n * DAY);
 export const daysBetween = (from, to) => Math.round((toUtc(to) - toUtc(from)) / DAY);
-export const weekStart = (iso) => addDays(iso, -((new Date(toUtc(iso)).getUTCDay() + 6) % 7));
+// Monday is 0.
+export const weekday = (iso) => (new Date(toUtc(iso)).getUTCDay() + 6) % 7;
+export const weekStart = (iso) => addDays(iso, -weekday(iso));
 const later = (a, b) => (a > b ? a : b);
 
 export function localIso(d = new Date()) {
@@ -16,7 +18,7 @@ export function localIso(d = new Date()) {
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
-export const emptyData = () => ({ v: 1, habits: [], log: {}, goals: [], tasks: [] });
+export const emptyData = () => ({ v: 1, habits: [], log: {}, skips: {}, goals: [], tasks: [] });
 
 // Unknown fields and habit types are kept, so an older version never drops what a newer one saved.
 export function normalize(data) {
@@ -29,10 +31,17 @@ export function normalize(data) {
     goals: list(data.goals).filter((g) => g?.id && g.habitId),
     tasks: list(data.tasks).filter((x) => x?.id),
     log: data.log && typeof data.log === "object" ? data.log : {},
+    skips: data.skips && typeof data.skips === "object" ? data.skips : {},
   };
 }
 
 export const entry = (data, id, date) => data.log[date]?.[id] ?? 0;
+
+// Only habits measured per day can have days off: chosen weekdays, or single days skipped.
+export const canSchedule = (habit) => habit.type === "check" || habit.type === "amount";
+export const isSkipped = (data, id, date) => Boolean(data.skips?.[date]?.[id]);
+export const isScheduled = (habit, date) => !canSchedule(habit) || !habit.days?.length || habit.days.includes(weekday(date));
+export const isOff = (data, habit, date) => canSchedule(habit) && (isSkipped(data, habit.id, date) || !isScheduled(habit, date));
 
 // For an avoid habit the logged value marks a slip, so an empty day is a good one.
 export function isDone(habit, value) {
@@ -72,6 +81,9 @@ function periodMet(data, habit, date) {
   return isDone(habit, entry(data, habit.id, date));
 }
 
+// A day off neither extends nor breaks a streak and is left out of the rate, unless something was done on it.
+const excused = (data, habit, date) => isOff(data, habit, date) && !periodMet(data, habit, date);
+
 // An unfinished current period does not break a streak yet; a slip on an avoid habit is final.
 const stillOpen = (data, habit, last) => habit.type !== "avoid" && !periodMet(data, habit, last);
 
@@ -80,14 +92,16 @@ export function streak(data, habit, today) {
   let best = 0;
   let run = 0;
   for (let d = first; d <= last; d = p.next(d)) {
+    if (excused(data, habit, d)) continue;
     run = periodMet(data, habit, d) ? run + 1 : 0;
     best = Math.max(best, run);
   }
   let current = 0;
   let d = stillOpen(data, habit, last) ? p.prev(last) : last;
-  while (d >= first && periodMet(data, habit, d)) {
+  for (; d >= first; d = p.prev(d)) {
+    if (excused(data, habit, d)) continue;
+    if (!periodMet(data, habit, d)) break;
     current++;
-    d = p.prev(d);
   }
   return { current, best, unit: periodOf(habit) };
 }
@@ -97,7 +111,7 @@ export function rate(data, habit, today, days) {
   let hit = 0;
   let total = 0;
   for (let d = first; d <= last; d = p.next(d)) {
-    if (d === last && stillOpen(data, habit, d)) continue;
+    if ((d === last && stillOpen(data, habit, d)) || excused(data, habit, d)) continue;
     const met = periodMet(data, habit, d);
     total++;
     if (met) hit++;
@@ -105,10 +119,11 @@ export function rate(data, habit, today, days) {
   return total ? hit / total : null;
 }
 
-// 0 = missed, 1–4 = how much got done, -1 = slipped (avoid habits), null = outside the habit's life.
+// 0 = missed, 1–4 = how much got done, -1 = slipped (avoid habits), "off" = a day off, null = outside the habit's life.
 export function level(data, habit, date, today) {
   if (date > today || date < habit.start) return null;
   const v = entry(data, habit.id, date);
+  if (!v && isOff(data, habit, date)) return "off";
   if (habit.type === "avoid") return v ? -1 : 4;
   if (habit.type === "amount") return v > 0 ? Math.min(4, Math.ceil((v / (habit.target || 1)) * 4)) : 0;
   return v > 0 ? 4 : 0;
@@ -145,17 +160,19 @@ function upsert(list, item) {
 }
 
 export function applyOp(data, op) {
-  if (op.t === "log") {
-    const day = (data.log[op.date] ??= {});
+  if (op.t === "log" || op.t === "skip") {
+    const days = op.t === "log" ? data.log : (data.skips ??= {});
+    const day = (days[op.date] ??= {});
     if (op.v) day[op.id] = op.v;
     else delete day[op.id];
-    if (!Object.keys(day).length) delete data.log[op.date];
+    if (!Object.keys(day).length) delete days[op.date];
   } else if (op.t === "habit") {
     upsert(data.habits, op.habit);
   } else if (op.t === "delHabit") {
     data.habits = data.habits.filter((h) => h.id !== op.id);
     data.goals = data.goals.filter((g) => g.habitId !== op.id);
     for (const date of Object.keys(data.log)) applyOp(data, { t: "log", date, id: op.id, v: 0 });
+    for (const date of Object.keys(data.skips ?? {})) applyOp(data, { t: "skip", date, id: op.id, v: 0 });
   } else if (op.t === "goal") {
     upsert(data.goals, op.goal);
   } else if (op.t === "delGoal") {
@@ -184,13 +201,14 @@ export function merge(base, device) {
     }
   }
   for (const [date, day] of Object.entries(device.log)) out.log[date] = { ...out.log[date], ...day };
+  for (const [date, day] of Object.entries(device.skips ?? {})) (out.skips ??= {})[date] = { ...out.skips[date], ...day };
   return out;
 }
 
-export const hasData = (data) => Boolean(data.habits.length || data.tasks.length || data.goals.length || Object.keys(data.log).length);
+export const hasData = (data) => Boolean(data.habits.length || data.tasks.length || data.goals.length || Object.keys(data.log).length || Object.keys(data.skips ?? {}).length);
 
 function opKey(op) {
-  if (op.t === "log") return `log:${op.date}:${op.id}`;
+  if (op.t === "log" || op.t === "skip") return `${op.t}:${op.date}:${op.id}`;
   const item = op.habit ?? op.goal ?? op.task;
   return item ? `${op.t}:${item.id}` : null;
 }

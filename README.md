@@ -2,7 +2,7 @@
 
 A minimal habit tracker in the style of [Daily Standup Generator](https://github.com/JoaquinAngelino/daily-standup-generator). Check habits off each day, see streaks, completion rates and a year heatmap, set goals with a deadline and a pace line, and keep a list of one-off tasks.
 
-In English and Spanish (picked from the browser, switchable in the top bar), and built for phones first.
+In English and Spanish (picked from the browser, switchable in the top bar), and built for phones first. It installs as an app from the browser, or with **Settings → Install app** where the browser allows it.
 
 ## Habits
 
@@ -13,6 +13,8 @@ In English and Spanish (picked from the browser, switchable in the top bar), and
 - **Avoid**: log a slip when it happens; every other day counts as clean.
 
 For amounts, weekly and monthly habits, **+** and **−** log more than once a day.
+
+Daily and amount habits can be limited to some days of the week, and any single day can be skipped. A day off does not break the streak or count against the completion rate, and still counts if you log it anyway.
 
 A goal counts done days (or the sum, for amounts) from the day it was set until its deadline, and shows whether you are ahead of or behind an even pace.
 

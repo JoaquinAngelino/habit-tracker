@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addDays, weekStart, daysBetween, emptyData, streak, rate, level, goalProgress, applyOp, replay, queue, isDone, normalize, sortTasks, periodCount, merge, hasData } from "../src/lib.js";
+import { addDays, weekStart, daysBetween, emptyData, streak, rate, level, goalProgress, applyOp, replay, queue, isDone, normalize, sortTasks, periodCount, merge, hasData, weekday, isOff } from "../src/lib.js";
 
 const TODAY = "2026-11-24"; // a Tuesday
 
@@ -191,4 +191,50 @@ test("clearing done tasks is one edit", () => {
   data.tasks.push({ id: "a" }, { id: "b" }, { id: "c" });
   applyOp(data, { t: "delTasks", ids: ["a", "c"] });
   assert.deepEqual(data.tasks, [{ id: "b" }]);
+});
+
+// TODAY is a Tuesday; 0 is Monday.
+const weekdays = { ...daily, days: [0, 1, 2, 3, 4] };
+
+test("days a habit is not scheduled for neither break the streak nor count in the rate", () => {
+  assert.equal(weekday("2026-11-21"), 5);
+  const data = dataWith(weekdays, { "2026-11-19": 1, "2026-11-20": 1, "2026-11-23": 1 });
+  assert.deepEqual(streak(data, weekdays, TODAY), { current: 3, best: 3, unit: "day" });
+  assert.equal(rate(data, weekdays, TODAY, 6), 1);
+  assert.equal(level(data, weekdays, "2026-11-21", TODAY), "off");
+  assert.equal(level(data, weekdays, "2026-11-18", TODAY), 0);
+});
+
+test("something done on a day off still counts", () => {
+  const data = dataWith(weekdays, { "2026-11-20": 1, "2026-11-21": 1, "2026-11-23": 1 });
+  assert.equal(streak(data, weekdays, TODAY).current, 3);
+  assert.equal(level(data, weekdays, "2026-11-21", TODAY), 4);
+});
+
+test("a skipped day keeps the streak, and undoing the skip breaks it", () => {
+  const data = dataWith(daily, { "2026-11-21": 1, "2026-11-23": 1 });
+  applyOp(data, { t: "skip", date: "2026-11-22", id: "h", v: 1 });
+  assert.equal(isOff(data, daily, "2026-11-22"), true);
+  assert.equal(streak(data, daily, TODAY).current, 2);
+  applyOp(data, { t: "skip", date: "2026-11-22", id: "h", v: 0 });
+  assert.deepEqual(data.skips, {});
+  assert.equal(streak(data, daily, TODAY).current, 1);
+});
+
+test("only habits measured per day can be skipped, and deleting a habit removes its skips", () => {
+  const weekly = { ...daily, type: "weekly", target: 2 };
+  const data = dataWith(weekly, {});
+  applyOp(data, { t: "skip", date: "2026-11-22", id: "h", v: 1 });
+  assert.equal(isOff(data, weekly, "2026-11-22"), false);
+  applyOp(data, { t: "delHabit", id: "h" });
+  assert.deepEqual(data.skips, {});
+});
+
+test("merging carries the device's skips, and data saved before skips existed still loads", () => {
+  const device = emptyData();
+  device.skips["2026-11-22"] = { h: 1 };
+  assert.deepEqual(merge(emptyData(), device).skips, { "2026-11-22": { h: 1 } });
+  const old = normalize({ v: 1, habits: [daily], log: {}, goals: [], tasks: [] });
+  assert.deepEqual(old.skips, {});
+  assert.equal(streak(old, daily, TODAY).current, 0);
 });
