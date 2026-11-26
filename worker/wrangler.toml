@@ -6,6 +6,12 @@ compatibility_date = "2026-11-01"
 # The OAuth client ID from Google Cloud. It is public: it ships in the page too.
 GOOGLE_CLIENT_ID = "657713120724-h1fovv0r8vjtf539cjmrvlo28ook5tf7.apps.googleusercontent.com"
 ALLOWED_ORIGINS = "https://joaquinangelino.github.io,http://localhost:8765"
+# Reminders stay off until both VAPID keys are set. The private one is a secret: npx wrangler secret put VAPID_PRIVATE_KEY
+VAPID_PUBLIC_KEY = ""
+VAPID_SUBJECT = "https://joaquinangelino.github.io/habit-tracker/"
+
+[triggers]
+crons = ["* * * * *"]
 
 [[d1_databases]]
 binding = "DB"

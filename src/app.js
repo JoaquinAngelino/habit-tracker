@@ -1,11 +1,16 @@
 import { $, el, icon, iconButton } from "./ui.js";
-import { TYPES, KINDS, sortTasks, localIso, addDays, weekStart, uid, entry, isDone, periodCount, streak, rate, level, goalProgress, canSchedule, isSkipped, isOff } from "./lib.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, level, goalProgress, canSchedule, isSkipped, isPaused, isOff, nextDue } from "./lib.js";
+import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap } from "./insights.js";
+import { toIcs } from "./ics.js";
+import { importFile } from "./importer.js";
+import { drawCard } from "./share.js";
 import { createStore } from "./store.js";
 import { local, session, read, write } from "./storage.js";
-import { fromB64 } from "./crypto.js";
+import { fromB64, wrap, unwrap } from "./crypto.js";
 import { DEFAULT_BRANCH } from "./github.js";
 import { t, setLanguage, getLanguage, applyTranslations } from "./i18n.js";
-import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount } from "./server.js";
+import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, publishLink, removeLink, feedUrl, saveRecovery, readRecovery } from "./server.js";
+import { buildShare, randomKey, newRecoveryCode, cleanCode, formatCode, utcMinutes, canRemind, syncReminders, createPasskey, usePasskey } from "./extras.js";
 
 const CONFIG_KEY = "ht.config";
 const TOKEN_KEY = "ht.token";
@@ -16,8 +21,22 @@ const SECRET_KEYS = [TOKEN_KEY, PASS_KEY, SESSION_KEY, EMAIL_KEY];
 const MODES = ["account", "github", "none"];
 const LANG_KEY = "ht.lang";
 const VIEWS = ["today", "tasks", "progress", "habits"];
-const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, avoid: 1 };
+const TIMER_KEY = "ht.timer";
+const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, timer: 20, avoid: 1 };
 const HEATMAP_WEEKS = 53;
+const SHARE_WEEKS = 26;
+const MOODS = [1, 2, 3, 4, 5];
+const MAX_TIMER_MINUTES = 24 * 60;
+const TEMPLATES = [
+  { key: "water", type: "amount", target: 8, unit: "glasses" },
+  { key: "read", type: "amount", target: 20, unit: "pages" },
+  { key: "walk", type: "amount", target: 8000, unit: "steps" },
+  { key: "exercise", type: "weekly", target: 3 },
+  { key: "meditate", type: "timer", target: 10 },
+  { key: "journal", type: "check" },
+  { key: "sleep", type: "check" },
+  { key: "sugar", type: "avoid" },
+];
 const DONE_TASKS_SHOWN = 20;
 
 const today = () => localIso();
@@ -28,10 +47,26 @@ const ui = {
   allDone: false,
   taskFilter: "all",
   goalDraft: null,
+  noteOpen: null,
+  week: 0,
+  year: null,
+  timer: loadTimer(),
+  extraNote: "",
+  recovering: false,
+  published: {},
   focus: null,
   status: { state: "off", err: null },
   syncedAt: null,
 };
+
+function loadTimer() {
+  try {
+    const timer = JSON.parse(read(local, TIMER_KEY) ?? "null");
+    return timer?.id && timer.at && timer.day ? timer : null;
+  } catch {
+    return null;
+  }
+}
 
 function loadSettings() {
   const defaults = { repo: "", branch: DEFAULT_BRANCH, remember: true, sub: "" };
@@ -99,6 +134,11 @@ const num = (n) => formatter(Intl.NumberFormat, { maximumFractionDigits: 1 }).fo
 const percent = (r) => (r == null ? "–" : formatter(Intl.NumberFormat, { style: "percent" }).format(r));
 const units = (count, unit) => t(unit, { count });
 const habitName = (habit) => habit.name.trim() || t("untitled");
+const unitOf = (habit) => (habit.type === "timer" ? t("minutes") : (habit.unit ?? "").trim());
+const groupOf = (habit) => (habit.group ?? "").trim();
+// 2024 began on a Monday.
+const weekdayName = (i, weekday) => formatter(Intl.DateTimeFormat, { weekday }).format(new Date(2024, 0, 1 + i));
+const byTime = (list) => [...list].sort((a, b) => ((a.time || "~") < (b.time || "~") ? -1 : (a.time || "~") > (b.time || "~") ? 1 : 0));
 
 // Streaks and rates walk a habit's whole history, so they are recomputed only when that habit's data changes.
 const memo = new Map();
@@ -120,7 +160,7 @@ function streakText(habit, s) {
 }
 
 function goalUnit(habit) {
-  if (habit.type === "amount") return habit.unit.trim() || t("unit_total");
+  if (isAmount(habit)) return unitOf(habit) || t("unit_total");
   return t(habit.type === "avoid" ? "unit_clean" : "unit_times");
 }
 
@@ -133,6 +173,7 @@ function textButton(label, onclick, { small = false, plus = false, danger = fals
   ]);
 }
 
+// With nothing to say when empty, an empty lane is only its heading.
 function lane(tone, title, { count = "", tools = [], rows, empty }) {
   return el("section", { class: "lane", "data-tone": tone }, [
     el("div", { class: "lane-head" }, [
@@ -140,7 +181,7 @@ function lane(tone, title, { count = "", tools = [], rows, empty }) {
       count ? el("span", { class: "lane-count", textContent: count }) : null,
       el("span", { class: "lane-tools" }, tools),
     ]),
-    el("div", { class: "rows" }, rows.length ? rows : [el("p", { class: "lane-empty" }, [].concat(empty))]),
+    el("div", { class: "rows" }, rows.length || empty == null ? rows : [el("p", { class: "lane-empty" }, [].concat(empty))]),
   ]);
 }
 
@@ -195,8 +236,55 @@ function taskTape(task) {
     title: t(task.done ? "markUndone" : "markDone"),
     "data-focus-key": `${task.id}:tape`,
     textContent: t(task.done ? "tape_done" : "tape_todo"),
-    onclick: () => patchTask(task.id, { done: task.done ? "" : today() }),
+    onclick: () => toggleTask(task),
   });
+}
+
+// Finishing a repeating task leaves it done and opens its next one, with the steps to do again.
+function toggleTask(task) {
+  if (task.done) return patchTask(task.id, { done: "" });
+  if (task.repeat) {
+    const next = { ...task, id: uid(), due: nextDue(task.due, task.repeat, today()), created: today() };
+    if (task.steps) next.steps = task.steps.map((s) => ({ ...s, id: uid(), done: false }));
+    store.commit({ t: "task", task: next }, { quiet: true });
+  }
+  patchTask(task.id, { done: today(), repeat: "" });
+}
+
+function stepsMark(task) {
+  const steps = task.steps ?? [];
+  return steps.length ? mark(t("stepsDone", { done: steps.filter((s) => s.done).length, total: steps.length })) : null;
+}
+
+function stepRows(task) {
+  const steps = task.steps ?? [];
+  const save = (next, opts) => patchTask(task.id, { steps: next }, opts);
+  const change = (id, patch) => steps.map((s) => (s.id === id ? { ...s, ...patch } : s));
+  return steps.map((step) => {
+    const check = el("input", {
+      type: "checkbox",
+      checked: Boolean(step.done),
+      "aria-label": t("stepDone"),
+      "data-focus-key": `${step.id}:done`,
+      onchange: () => save(change(step.id, { done: check.checked })),
+    });
+    const title = el("input", {
+      class: "title-input",
+      value: step.title,
+      placeholder: t("stepPlaceholder"),
+      "aria-label": t("stepPlaceholder"),
+      "data-focus-key": `${step.id}:title`,
+      onchange: () => save(change(step.id, { title: title.value })),
+      onkeydown: (e) => e.key === "Enter" && title.blur(),
+    });
+    return el("div", { class: `step${step.done ? " is-closed" : ""}` }, [check, title, iconButton("x", t("removeStep"), () => save(steps.filter((s) => s.id !== step.id)))]);
+  });
+}
+
+function addStep(task) {
+  const id = uid();
+  ui.focus = `${id}:title`;
+  patchTask(task.id, { steps: [...(task.steps ?? []), { id, title: "", done: false }] });
 }
 
 function dueMark(task) {
@@ -212,7 +300,7 @@ function dueRow(task) {
     tape: taskTape(task),
     body: [
       el("p", { class: "item-title", textContent: task.title.trim() || t("untitledTask") }),
-      el("p", { class: "item-marks" }, [mark(t(`kind_${task.kind}`)), dueMark(task)]),
+      el("p", { class: "item-marks" }, [mark(t(`kind_${task.kind}`)), dueMark(task), task.repeat ? mark(t(`every_${task.repeat}`)) : null, stepsMark(task)]),
     ],
   });
 }
@@ -240,6 +328,13 @@ function taskRow(task) {
     "data-focus-key": `${task.id}:due`,
     onchange: () => patchTask(task.id, { due: due.value }),
   });
+  const repeat = el(
+    "select",
+    { class: "pill-select", "aria-label": t("taskRepeat"), "data-focus-key": `${task.id}:repeat`, onchange: () => patchTask(task.id, { repeat: repeat.value }) },
+    REPEATS.map((k) => el("option", { value: k, textContent: t(`every_${k || "none"}`) })),
+  );
+  repeat.value = REPEATS.includes(task.repeat) ? task.repeat : "";
+  const steps = stepRows(task);
   return itemRow({
     id: task.id,
     closed: Boolean(task.done),
@@ -250,9 +345,13 @@ function taskRow(task) {
         kind,
         el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("due") }), due]),
         dueMark(task),
+        task.done ? null : repeat,
+        stepsMark(task),
+        task.done ? null : textButton(t("addStep"), () => addStep(task), { small: true, plus: true }),
       ]),
     ],
     side: el("div", { class: "item-x" }, [iconButton("x", t("deleteTask"), () => store.commit({ t: "delTask", id: task.id }))]),
+    after: steps.length ? [el("div", { class: "steps" }, steps)] : [],
   });
 }
 
@@ -312,7 +411,7 @@ const TAPE_TONES = { slipped: " is-slip", done: " is-done", clean: " is-done", t
 function todayTape(habit, day, value) {
   const state = tapeState(habit, value);
   const tone = TAPE_TONES[state];
-  if (habit.type === "amount") {
+  if (isAmount(habit)) {
     const input = el("input", {
       class: "tape-input",
       type: "number",
@@ -339,32 +438,158 @@ function todayTape(habit, day, value) {
   });
 }
 
+const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+const timerLabel = () => t("stopTimer", { time: clock(Date.now() - ui.timer.at) });
+
+function saveTimer(timer) {
+  ui.timer = timer;
+  write(local, TIMER_KEY, timer ? JSON.stringify(timer) : null);
+}
+
+// Logged on the day it started, to the nearest minute; a timer that ran at all counts for one.
+function stopTimer() {
+  const timer = ui.timer;
+  if (!timer) return;
+  saveTimer(null);
+  const habit = habits().find((h) => h.id === timer.id);
+  if (!habit) return render();
+  const minutes = Math.min(MAX_TIMER_MINUTES, Math.max(1, Math.round((Date.now() - timer.at) / 60000)));
+  setLog(habit, timer.day, entry(data(), habit.id, timer.day) + minutes);
+}
+
+function timerButton(habit) {
+  const running = ui.timer?.id === habit.id;
+  return el("button", {
+    type: "button",
+    class: "btn",
+    "data-timer": running ? "on" : null,
+    "data-focus-key": `${habit.id}:timer`,
+    textContent: running ? timerLabel() : t("start"),
+    onclick: () => {
+      stopTimer();
+      if (running) return;
+      saveTimer({ id: habit.id, at: Date.now(), day: today() });
+      render();
+    },
+  });
+}
+
+function offMark(d, habit, day) {
+  if (isSkipped(d, habit.id, day)) return t("skipped");
+  return t(isPaused(d, habit, day) ? "onBreak" : "notScheduled");
+}
+
 function todayRow(habit, day) {
   const d = data();
   const value = entry(d, habit.id, day);
   const s = streakOf(habit);
-  const marks = [mark(streakText(habit, s), s.current ? "green" : null)];
+  const marks = [habit.time ? mark(habit.time) : null, mark(streakText(habit, s), s.current ? "green" : null)];
   if (s.best > s.current) marks.push(mark(t("best", { units: units(s.best, s.unit) })));
   if (habit.type === "weekly" || habit.type === "monthly") {
     marks.push(mark(t(habit.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, habit, day), target: habit.target })));
   }
-  if (habit.type === "amount" && habit.unit.trim()) marks.push(mark(habit.unit.trim()));
-  const skipped = isSkipped(d, habit.id, day);
-  if (!value && isOff(d, habit, day)) marks.push(mark(t(skipped ? "skipped" : "notScheduled")));
+  if (isAmount(habit) && unitOf(habit)) marks.push(mark(unitOf(habit)));
+  const off = isOff(d, habit, day);
+  if (!value && off) marks.push(mark(offMark(d, habit, day)));
+  if (isSkipped(d, habit.id, day)) marks.push(textButton(t("undoSkip"), () => setSkip(habit, day, false), { small: true }));
+  else if (canSchedule(habit) && !isDone(habit, value) && !off) marks.push(textButton(t("skip"), () => setSkip(habit, day, true), { small: true }));
+
+  const text = note(d, habit.id, day);
+  const noteKey = `${habit.id}:note`;
+  const openKey = `${habit.id}:${day}`;
+  const setNote = (v, opts) => store.commit({ t: "note", date: day, id: habit.id, v }, opts);
+  let noteInput = null;
+  if (text || ui.noteOpen === openKey) {
+    noteInput = el("input", {
+      class: "title-input note-input",
+      value: text,
+      maxLength: 500,
+      placeholder: t("notePlaceholder"),
+      "aria-label": t("noteFor", { name: habitName(habit) }),
+      "data-focus-key": noteKey,
+      oninput: () => setNote(noteInput.value, { quiet: true }),
+      onchange: () => {
+        if (noteInput.value.trim()) return;
+        ui.noteOpen = null;
+        setNote("");
+      },
+      onkeydown: (e) => e.key === "Enter" && noteInput.blur(),
+    });
+  } else {
+    marks.push(textButton(t("addNote"), () => {
+      ui.noteOpen = openKey;
+      ui.focus = noteKey;
+      render();
+    }, { small: true }));
+  }
+
   const actions = [];
-  if (habit.type === "amount" || habit.type === "weekly" || habit.type === "monthly") {
+  if (habit.type === "timer") {
+    if (day === today()) actions.push(timerButton(habit));
+  } else if (habit.type === "amount" || habit.type === "weekly" || habit.type === "monthly") {
     actions.push(
       iconButton("minus", t("oneLess"), () => setLog(habit, day, Math.max(0, value - 1)), { disabled: !value }),
       iconButton("plus", t("oneMore"), () => setLog(habit, day, value + 1)),
     );
   }
-  if (skipped) actions.push(textButton(t("undoSkip"), () => setSkip(habit, day, false), { small: true }));
-  else if (canSchedule(habit) && !isDone(habit, value) && !isOff(d, habit, day)) actions.push(textButton(t("skip"), () => setSkip(habit, day, true), { small: true }));
   return itemRow({
     id: habit.id,
     tape: todayTape(habit, day, value),
-    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, marks)],
+    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, marks), noteInput],
     side: actions.length ? el("div", { class: "item-actions" }, actions) : null,
+  });
+}
+
+// A group of habits, such as a morning routine, listed together in the order they are done.
+function groupLane(name, list, day) {
+  const d = data();
+  const done = list.filter((h) => isDone(h, entry(d, h.id, day))).length;
+  const todo = list.filter((h) => h.type === "check" && !entry(d, h.id, day));
+  return lane("green", name, {
+    count: t("doneCount", { done, total: list.length }),
+    tools: todo.length > 1 ? [textButton(t("doAll"), () => todo.forEach((h) => setLog(h, day, 1)), { small: true })] : [],
+    rows: list.map((h) => todayRow(h, day)),
+  });
+}
+
+function dayLane(day) {
+  const current = data().days?.[day] ?? {};
+  const set = (patch, opts) => store.commit({ t: "day", date: day, day: { ...(data().days?.[day] ?? {}), ...patch } }, opts);
+  const scale = (field, label) => el("span", { class: "days", role: "group", "aria-label": t(field) }, MOODS.map((m) =>
+    el("button", {
+      type: "button",
+      class: "day",
+      "aria-pressed": String(current[field] === m),
+      "aria-label": label(m),
+      title: label(m),
+      "data-focus-key": `day:${field}${m}`,
+      textContent: String(m),
+      onclick: () => set({ [field]: current[field] === m ? 0 : m }),
+    })));
+  const moods = scale("mood", (m) => t(`mood_${m}`));
+  const text = el("input", {
+    class: "title-input note-input",
+    value: current.note ?? "",
+    maxLength: 1000,
+    placeholder: t("dayNotePlaceholder"),
+    "aria-label": t("dayNote"),
+    "data-focus-key": "day:note",
+    oninput: () => set({ note: text.value }, { quiet: true }),
+    onkeydown: (e) => e.key === "Enter" && text.blur(),
+  });
+  return lane("purple", t("dayLog"), {
+    rows: [
+      el("article", { class: "item" }, [
+        el("div", { class: "item-meta" }, [
+          el("span", { class: "meta-label", textContent: t("mood") }),
+          moods,
+          current.mood ? mark(t(`mood_${current.mood}`)) : null,
+          el("span", { class: "meta-label", textContent: t("energy") }),
+          scale("energy", (m) => t("energyLevel", { level: m })),
+        ]),
+        text,
+      ]),
+    ],
   });
 }
 
@@ -383,11 +608,12 @@ function dueLane(day) {
 function todayView() {
   const day = ui.day;
   const now = today();
-  const started = activeHabits().filter((h) => h.start <= day);
+  const started = byTime(activeHabits().filter((h) => h.start <= day));
   // A day off still lists the habit, apart, so it can be logged anyway; logging moves it back.
   const off = started.filter((h) => !entry(data(), h.id, day) && isOff(data(), h, day));
   const due = started.filter((h) => !off.includes(h));
   const done = due.filter((h) => isDone(h, entry(data(), h.id, day))).length;
+  const groups = [...new Set(due.map(groupOf).filter(Boolean))];
   const go = (to) => {
     ui.day = to;
     render();
@@ -400,11 +626,13 @@ function todayView() {
         iconButton("left", t("prevDay"), () => go(addDays(day, -1))),
         iconButton("right", t("nextDay"), () => go(addDays(day, 1)), { disabled: day >= now }),
       ],
-      rows: due.map((h) => todayRow(h, day)),
-      empty: !activeHabits().length ? firstHabitLink() : started.length ? t("allOff") : t("noneStarted"),
+      rows: due.filter((h) => !groupOf(h)).map((h) => todayRow(h, day)),
+      empty: groups.length ? null : !activeHabits().length ? firstHabitLink() : started.length ? t("allOff") : t("noneStarted"),
     }),
+    ...groups.map((name) => groupLane(name, due.filter((h) => groupOf(h) === name), day)),
     off.length ? lane("muted", t("dayOff"), { count: t("habits", { count: off.length }), rows: off.map((h) => todayRow(h, day)) }) : null,
     dueLane(day),
+    activeHabits().length ? dayLane(day) : null,
   ];
 }
 
@@ -513,7 +741,7 @@ const stat = (label, value) => el("div", { class: "stat" }, [el("dt", { textCont
 
 function cellText(habit, value, lvl) {
   if (lvl === "off") return t("cell_off");
-  if (habit.type === "amount") return t("cell_amount", { value: num(value), target: num(habit.target || 1) });
+  if (isAmount(habit)) return t("cell_amount", { value: num(value), target: num(habit.target || 1) });
   if (habit.type === "avoid") return t(lvl < 0 ? "cell_slipped" : "cell_clean");
   return t(value ? "cell_done" : "cell_missed") + (value > 1 ? ` ×${value}` : "");
 }
@@ -534,16 +762,133 @@ function heatmap(habit) {
   ]);
 }
 
+function pattern(habit) {
+  const rates = remember(habit, "pattern", () => weekdayPattern(data(), habit, today()));
+  if (rates.every((r) => r == null)) return null;
+  return el("div", { class: "pattern", role: "img", "aria-label": t("byWeekday"), title: t("byWeekday") }, rates.map((r, i) =>
+    el("span", { class: "pattern-day", title: `${weekdayName(i, "long")}: ${percent(r)}` }, [
+      el("span", { class: "pattern-track" }, [el("span", { class: "pattern-bar", style: `height:${Math.round((r ?? 0) * 100)}%` })]),
+      el("span", { class: "pattern-label", textContent: weekdayName(i, "narrow") }),
+    ])));
+}
+
+function download(blob, name) {
+  const link = el("a", { href: URL.createObjectURL(blob), download: name });
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
+
+// Shared through the system sheet where the browser can share files, downloaded otherwise.
+async function shareCard(habit) {
+  const s = streakOf(habit);
+  const now = today();
+  const css = getComputedStyle(document.documentElement);
+  const first = addDays(weekStart(now), -7 * (SHARE_WEEKS - 1));
+  const canvas = drawCard({
+    name: habitName(habit),
+    label: t(habit.type === "avoid" ? "cleanLabel" : "streakLabel"),
+    big: units(s.current, s.unit),
+    lines: [`${t("bestLabel")}: ${units(s.best, s.unit)}`, `${t("last30")}: ${percent(rateOf(habit, 30))}`],
+    cells: Array.from({ length: SHARE_WEEKS * 7 }, (_, i) => (addDays(first, i) > now ? null : level(data(), habit, addDays(first, i), now))),
+    footer: t("title"),
+    colors: Object.fromEntries(["panel", "ink", "muted", "green", "red"].map((name) => [name, css.getPropertyValue(`--${name}`).trim()])),
+  });
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) return;
+  const file = new File([blob], "streak.png", { type: "image/png" });
+  if (navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: habitName(habit) });
+    } catch {
+      /* closed without sharing */
+    }
+    return;
+  }
+  download(blob, "streak.png");
+}
+
+const insight = (text) => el("article", { class: "item" }, [el("p", { class: "item-title", textContent: text })]);
+
+function weekLane(active) {
+  const now = today();
+  const start = addDays(weekStart(now), -7 * ui.week);
+  const week = weekReview(data(), active, start, now);
+  const before = weekReview(data(), active, addDays(start, -7), now);
+  const delta = week.rate != null && before.rate != null ? Math.round((week.rate - before.rate) * 100) : null;
+  const short = { month: "short", day: "numeric" };
+  const move = (n) => {
+    ui.week += n;
+    render();
+  };
+  const summary = el("article", { class: "item" }, [
+    el("dl", { class: "stats stats-wide" }, [
+      stat(t("completion"), percent(week.rate)),
+      stat(t("vsLastWeek"), delta == null ? "–" : `${delta > 0 ? "+" : ""}${delta}%`),
+      stat(t("tasksDoneLabel"), num(week.tasksDone)),
+      stat(t("mood"), week.mood == null ? "–" : num(week.mood)),
+    ]),
+    el("p", { class: "item-marks" }, week.rows.map((r) => mark(`${habitName(r.habit)} ${num(r.done)}/${num(r.due)}`, r.done >= r.due ? "green" : null))),
+  ]);
+  return lane("green", t("weekReview"), {
+    count: `${fmtDay(week.start, short)} – ${fmtDay(week.end, short)}`,
+    tools: [iconButton("left", t("prevWeek"), () => move(1)), iconButton("right", t("nextWeek"), () => move(-1), { disabled: !ui.week })],
+    rows: [summary],
+  });
+}
+
+function patternsLane(active) {
+  const now = today();
+  const rows = [
+    ...correlations(data(), active, now).map((c) => insight(t("corrWith", { a: habitName(c.a), b: habitName(c.b), withA: percent(c.withA), withoutA: percent(c.withoutA) }))),
+    ...moodLinks(data(), active, now).map((m) => insight(t("moodLink", { habit: habitName(m.habit), done: num(m.done), missed: num(m.missed) }))),
+  ];
+  return lane("purple", t("patterns"), { rows, empty: t("patternsEmpty") });
+}
+
+function yearLane() {
+  const now = today();
+  const thisYear = Number(now.slice(0, 4));
+  const year = ui.year ?? thisYear;
+  const r = yearRecap(data(), habits(), year, now);
+  const move = (n) => {
+    ui.year = year + n;
+    render();
+  };
+  const rows = [];
+  if (r.checkins || r.tasksDone || r.slips) {
+    rows.push(el("article", { class: "item" }, [
+      el("dl", { class: "stats stats-wide" }, [
+        stat(t("checkins"), num(r.checkins)),
+        stat(t("activeDays"), num(r.activeDays)),
+        stat(t("longestStreak"), r.streak ? units(r.streak.count, "day") : "–"),
+        stat(t("tasksDoneLabel"), num(r.tasksDone)),
+      ]),
+      el("p", { class: "item-marks" }, [
+        r.top ? mark(`${t("topHabit")}: ${habitName(r.top.habit)} · ${units(r.top.days, "day")}`, "green") : null,
+        r.streak ? mark(`${t("longestStreak")}: ${habitName(r.streak.habit)}`) : null,
+        ...r.totals.map((x) => mark(`${habitName(x.habit)}: ${num(x.total)} ${unitOf(x.habit)}`.trim())),
+        r.mood == null ? null : mark(`${t("mood")}: ${num(r.mood)}`),
+        r.slips ? mark(`${t("slipsLabel")}: ${num(r.slips)}`) : null,
+      ]),
+    ]));
+  }
+  return lane("yellow", t("yearTitle", { year }), {
+    tools: [iconButton("left", t("prevYear"), () => move(-1)), iconButton("right", t("nextYear"), () => move(1), { disabled: year >= thisYear })],
+    rows,
+    empty: t("yearEmpty"),
+  });
+}
+
 function statsRow(habit) {
   const s = streakOf(habit);
   let kind = t(`type_${habit.type}`);
   if (habit.type === "weekly") kind += ` · ${t("perWeek", { count: habit.target })}`;
   if (habit.type === "monthly") kind += ` · ${t("perMonth", { count: habit.target })}`;
-  if (habit.type === "amount") kind += ` · ${t("perDayUnit", { count: num(habit.target), unit: habit.unit.trim() })}`;
+  if (isAmount(habit)) kind += ` · ${t("perDayUnit", { count: num(habit.target), unit: unitOf(habit) })}`;
   return itemRow({
     id: habit.id,
     tape: el("span", { class: `tape item-tape${s.current ? " is-done" : ""}`, title: streakText(habit, s), textContent: t(`short_${s.unit}`, { count: s.current }) }),
-    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, [mark(kind)])],
+    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, [mark(kind), textButton(t("share"), () => shareCard(habit), { small: true })])],
     after: [
       el("dl", { class: "stats" }, [
         stat(t(habit.type === "avoid" ? "cleanLabel" : "streakLabel"), units(s.current, s.unit)),
@@ -552,6 +897,7 @@ function statsRow(habit) {
         stat(t("last30"), percent(rateOf(habit, 30))),
         stat(t("last90"), percent(rateOf(habit, 90))),
       ]),
+      pattern(habit),
       heatmap(habit),
     ],
   });
@@ -576,34 +922,80 @@ function progressView() {
       rows,
       empty: active.length ? t("noGoals") : t("addHabitFirst"),
     }),
+    active.length ? weekLane(active) : null,
     lane("blue", t("stats"), { rows: active.map(statsRow), empty: firstHabitLink() }),
+    active.length ? patternsLane(active) : null,
+    habits().length ? yearLane() : null,
   ];
 }
 
-function addHabit() {
+function addHabit(template) {
   const habit = { id: uid(), name: "", type: "check", target: 1, unit: "", start: today(), archived: false };
+  if (template) {
+    Object.assign(habit, {
+      name: t(`tpl_${template.key}`),
+      type: template.type,
+      target: template.target ?? DEFAULT_TARGET[template.type],
+      unit: template.unit ? t(`unit_${template.unit}`) : "",
+    });
+  }
   ui.focus = `${habit.id}:name`;
   store.commit({ t: "habit", habit });
 }
 
-// No days stored means every day, so picking all seven, or none, clears the list.
+// Unpicking the last day goes back to every day.
 function dayPicker(habit, patch) {
-  const chosen = habit.days?.length ? habit.days : [0, 1, 2, 3, 4, 5, 6];
-  const name = (i, weekday) => formatter(Intl.DateTimeFormat, { weekday }).format(new Date(2024, 0, 1 + i));
-  const toggle = (i) => {
-    const next = chosen.includes(i) ? chosen.filter((x) => x !== i) : [...chosen, i].sort();
-    patch({ days: next.length && next.length < 7 ? next : [] });
-  };
+  const chosen = habit.days ?? [];
+  const toggle = (i) => patch({ days: chosen.includes(i) ? chosen.filter((x) => x !== i) : [...chosen, i].sort() });
   return el("span", { class: "days", role: "group", "aria-label": t("onDays") }, [0, 1, 2, 3, 4, 5, 6].map((i) =>
     el("button", {
       type: "button",
       class: "day",
       "aria-pressed": String(chosen.includes(i)),
-      "aria-label": name(i, "long"),
+      "aria-label": weekdayName(i, "long"),
       "data-focus-key": `${habit.id}:day${i}`,
-      textContent: name(i, "narrow"),
+      textContent: weekdayName(i, "narrow"),
       onclick: () => toggle(i),
     })));
+}
+
+const SCHEDULES = { daily: { days: [], every: 0 }, days: { days: [0, 1, 2, 3, 4], every: 0 }, every: { days: [], every: 2 } };
+
+function scheduleFields(habit, patch) {
+  const mode = habit.every > 1 ? "every" : habit.days?.length ? "days" : "daily";
+  const select = el(
+    "select",
+    { class: "pill-select", "aria-label": t("schedule"), "data-focus-key": `${habit.id}:repeat`, onchange: () => patch(SCHEDULES[select.value]) },
+    Object.keys(SCHEDULES).map((k) => el("option", { value: k, textContent: t(`repeat_${k}`) })),
+  );
+  select.value = mode;
+  if (mode === "days") return [select, dayPicker(habit, patch)];
+  if (mode === "daily") return [select];
+  const every = el("input", {
+    type: "number",
+    class: "num-input",
+    min: 2,
+    step: 1,
+    inputMode: "numeric",
+    value: habit.every,
+    "aria-label": t("interval"),
+    "data-focus-key": `${habit.id}:every`,
+    onchange: () => patch({ every: Math.max(2, Math.round(Number(every.value)) || 2) }),
+  });
+  return [select, el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("everyN") }), every, el("span", { class: "meta-label", textContent: t("daysWord") })])];
+}
+
+// Swaps a habit with its neighbour in the list it is shown in.
+function moveHabit(habit, step) {
+  const peers = habits().filter((h) => Boolean(h.archived) === Boolean(habit.archived));
+  const other = peers[peers.findIndex((h) => h.id === habit.id) + step];
+  if (!other) return;
+  const ids = data().habits.map((h) => h.id);
+  const a = ids.indexOf(habit.id);
+  const b = ids.indexOf(other.id);
+  [ids[a], ids[b]] = [ids[b], ids[a]];
+  ui.focus = `${habit.id}:${step < 0 ? "up" : "down"}`;
+  store.commit({ t: "order", ids });
 }
 
 function editRow(habit) {
@@ -637,7 +1029,7 @@ function editRow(habit) {
       "data-focus-key": `${habit.id}:target`,
       onchange: () => patch({ target: Number(target.value) > 0 ? Number(target.value) : 1 }),
     });
-    fields.push(el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: t({ weekly: "timesWeek", monthly: "timesMonth", amount: "aDay" }[habit.type]) })]));
+    fields.push(el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: t({ weekly: "timesWeek", monthly: "timesMonth", amount: "aDay", timer: "minDay" }[habit.type]) })]));
   }
   if (habit.type === "amount") {
     const unit = el("input", {
@@ -659,12 +1051,36 @@ function editRow(habit) {
     onchange: () => start.value && patch({ start: start.value }),
   });
   fields.push(el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("since") }), start]));
-  if (canSchedule(habit)) fields.push(dayPicker(habit, patch));
+  const time = el("input", {
+    type: "time",
+    value: habit.time ?? "",
+    "aria-label": t("timeOfDay"),
+    "data-focus-key": `${habit.id}:time`,
+    onchange: () => patch({ time: time.value }),
+  });
+  fields.push(el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("at") }), time]));
+  if (canSchedule(habit)) fields.push(...scheduleFields(habit, patch));
+  const group = el("input", {
+    class: "unit-input",
+    value: habit.group ?? "",
+    placeholder: t("groupPlaceholder"),
+    "aria-label": t("group"),
+    "data-focus-key": `${habit.id}:group`,
+    oninput: () => patch({ group: group.value }, { quiet: true }),
+    onchange: () => render(),
+  });
+  // `list` is read-only as a property.
+  group.setAttribute("list", "groups");
+  fields.push(group);
+  const peers = habits().filter((h) => Boolean(h.archived) === Boolean(habit.archived));
+  const at = peers.findIndex((h) => h.id === habit.id);
 
   const confirmKey = `habit:${habit.id}`;
   const actions = ui.confirm === confirmKey
     ? confirmButtons(t("deleteConfirm"), () => store.commit({ t: "delHabit", id: habit.id }), render)
     : [
+      iconButton("up", t("moveUp"), () => moveHabit(habit, -1), { disabled: at === 0, "data-focus-key": `${habit.id}:up` }),
+      iconButton("down", t("moveDown"), () => moveHabit(habit, 1), { disabled: at === peers.length - 1, "data-focus-key": `${habit.id}:down` }),
       textButton(t(habit.archived ? "restore" : "archive"), () => patch({ archived: !habit.archived }), { small: true }),
       iconButton("x", t("deleteHabit"), () => setConfirm(confirmKey, render)),
     ];
@@ -674,16 +1090,68 @@ function editRow(habit) {
   ]);
 }
 
+function pauseRow(pause) {
+  // Moving one end past the other drags the other along.
+  const save = (patch) => {
+    const next = { ...pause, ...patch };
+    if (next.to < next.from) Object.assign(next, patch.from ? { to: next.from } : { from: next.to });
+    store.commit({ t: "pause", pause: next });
+  };
+  const who = el(
+    "select",
+    { class: "pill-select", "aria-label": t("habit"), "data-focus-key": `${pause.id}:who`, onchange: () => save({ habitId: who.value }) },
+    [el("option", { value: "", textContent: t("allHabits") }), ...habits().filter((h) => h.type !== "avoid").map((h) => el("option", { value: h.id, textContent: habitName(h) }))],
+  );
+  who.value = pause.habitId ?? "";
+  const date = (field, label) => {
+    const input = el("input", {
+      type: "date",
+      value: pause[field],
+      "aria-label": t(label),
+      "data-focus-key": `${pause.id}:${field}`,
+      onchange: () => input.value && save({ [field]: input.value }),
+    });
+    return el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t(label) }), input]);
+  };
+  return el("article", { class: "item", "data-id": pause.id }, [
+    el("div", { class: "edit-row" }, [
+      el("div", { class: "item-meta" }, [who, date("from", "breakFrom"), date("to", "breakTo"), pause.from <= today() && today() <= pause.to ? mark(t("onBreak"), "yellow") : null]),
+      el("div", { class: "item-actions" }, [iconButton("x", t("removeBreak"), () => store.commit({ t: "delPause", id: pause.id }))]),
+    ]),
+  ]);
+}
+
+function templatePicker() {
+  const select = el(
+    "select",
+    {
+      class: "pill-select",
+      "aria-label": t("templates"),
+      "data-focus-key": "habits:template",
+      onchange: () => {
+        const template = TEMPLATES.find((x) => x.key === select.value);
+        if (template) addHabit(template);
+      },
+    },
+    [el("option", { value: "", textContent: t("fromTemplate") }), ...TEMPLATES.map((x) => el("option", { value: x.key, textContent: t(`tpl_${x.key}`) }))],
+  );
+  return select;
+}
+
 function habitsView() {
   const current = habits().filter((h) => !h.archived);
   const archived = habits().filter((h) => h.archived);
+  const pauses = [...(data().pauses ?? [])].sort((a, b) => (a.from < b.from ? 1 : a.from > b.from ? -1 : 0));
+  const addBreak = () => store.commit({ t: "pause", pause: { id: uid(), from: today(), to: addDays(today(), 6), habitId: "" } });
   return [
+    el("datalist", { id: "groups" }, [...new Set(habits().map(groupOf).filter(Boolean))].map((name) => el("option", { value: name }))),
     lane("yellow", t("habits"), {
       count: current.length ? t("habits", { count: current.length }) : "",
-      tools: [textButton(t("addHabit"), addHabit, { plus: true })],
+      tools: [templatePicker(), textButton(t("addHabit"), () => addHabit(), { plus: true })],
       rows: current.map(editRow),
       empty: t("habitsEmpty"),
     }),
+    habits().length ? lane("blue", t("breaks"), { tools: [textButton(t("addBreak"), addBreak, { plus: true })], rows: pauses.map(pauseRow), empty: t("breaksEmpty") }) : null,
     archived.length ? lane("muted", t("archived"), { count: t("habits", { count: archived.length }), rows: archived.map(editRow) }) : null,
   ];
 }
@@ -745,6 +1213,7 @@ function showStatus(state, err = null) {
   ui.status = { state, err };
   if (state === "synced") ui.syncedAt = new Date();
   paintStatus();
+  if (state === "synced") refreshPublished().catch(() => {});
 }
 
 // The server no longer knows this session; the device keeps its data until Sign out.
@@ -763,10 +1232,20 @@ function changeLanguage(lang) {
 }
 
 function exportData() {
-  const file = new Blob([JSON.stringify(data(), null, 2)], { type: "application/json" });
-  const link = el("a", { href: URL.createObjectURL(file), download: `habit-tracker-${today()}.json` });
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  download(new Blob([JSON.stringify(data(), null, 2)], { type: "application/json" }), `habit-tracker-${today()}.json`);
+}
+
+async function importData(file) {
+  const result = $("#importResult");
+  try {
+    const incoming = importFile(file.name, await file.text(), data(), { uid, today: today() });
+    const known = new Set(data().habits.map((h) => h.id));
+    store.commit({ t: "import", data: incoming });
+    result.textContent = t("imported", { count: incoming.habits.filter((h) => !known.has(h.id)).length, days: Object.keys(incoming.log).length });
+  } catch {
+    result.textContent = t("errImport");
+  }
+  result.hidden = false;
 }
 
 let googleReady = null;
@@ -798,25 +1277,185 @@ function credentialProfile(credential) {
   return { sub: payload.sub, email: payload.email ?? "" };
 }
 
+function startAccount({ token, sub, email }) {
+  // Another person's passphrase must not seal this account's data.
+  if (settings.sub && settings.sub !== sub) {
+    saveSecret(PASS_KEY, "");
+    $("#passphrase").value = "";
+  }
+  settings.sub = sub;
+  saveSettings();
+  saveSecret(SESSION_KEY, token);
+  saveSecret(EMAIL_KEY, email);
+  paintSettings();
+  if (!secret(PASS_KEY)) $("#passphrase").focus();
+  store.sync();
+}
+
 async function onCredential({ credential }) {
   try {
     const { token } = await signIn(credential);
-    const { sub, email } = credentialProfile(credential);
-    // Another person's passphrase must not seal this account's data.
-    if (settings.sub && settings.sub !== sub) {
-      saveSecret(PASS_KEY, "");
-      $("#passphrase").value = "";
-    }
-    settings.sub = sub;
-    saveSettings();
-    saveSecret(SESSION_KEY, token);
-    saveSecret(EMAIL_KEY, email);
-    paintSettings();
-    if (!secret(PASS_KEY)) $("#passphrase").focus();
-    store.sync();
+    startAccount({ token, ...credentialProfile(credential) });
   } catch (err) {
     showStatus("error", { code: "errSignIn", message: describe(err) });
   }
+}
+
+// An account opened with a passkey is known by the server's own ID for it.
+async function passkeyAccount(ceremony) {
+  try {
+    const { token, userId } = await ceremony();
+    startAccount({ token, sub: `id:${userId}`, email: "" });
+  } catch (err) {
+    // Closing the browser's passkey sheet is not an error.
+    if (err.name !== "NotAllowedError" && err.name !== "AbortError") showStatus("error", { code: "errSignIn", message: describe(err) });
+  }
+}
+
+const inAccount = () => settings.mode === "account" && Boolean(secret(SESSION_KEY));
+const shareUrl = () => `${new URL("share.html", location.href).href}#${settings.share.token}.${settings.share.key}`;
+const reminderMinutes = () => utcMinutes([...new Set(activeHabits().map((h) => h.time).filter(Boolean))]);
+// The time the file was made changes on every build and is not a change worth publishing.
+const feedBody = () => toIcs(data());
+const feedKey = (body) => body.replace(/DTSTAMP:.*/g, "");
+const shareBody = () => JSON.stringify(buildShare(data(), activeHabits().filter((h) => settings.share.ids.includes(h.id)), today(), settings.share.name ?? ""));
+
+async function publishFeed() {
+  const body = feedBody();
+  settings.feed = (await publishLink("feed", secret(SESSION_KEY), new TextEncoder().encode(body))).token;
+  ui.published.feed = feedKey(body);
+}
+
+async function publishShare() {
+  const body = shareBody();
+  settings.share.token = (await publishLink("share", secret(SESSION_KEY), await wrap(body, settings.share.key))).token;
+  ui.published.share = body;
+}
+
+async function sendReminders() {
+  const minutes = reminderMinutes();
+  await syncReminders(secret(SESSION_KEY), minutes, true);
+  ui.published.remind = minutes.join();
+}
+
+// After a sync, whatever is published is brought up to date if it changed.
+async function refreshPublished() {
+  if (!inAccount()) return;
+  if (settings.feed && ui.published.feed !== feedKey(feedBody())) await publishFeed();
+  if (settings.share && ui.published.share !== shareBody()) await publishShare();
+  if (settings.remind && canRemind() && ui.published.remind !== reminderMinutes().join()) await sendReminders();
+  saveSettings();
+}
+
+// Runs one of the account extras, then repaints with what it said or how it failed.
+async function extra(action) {
+  ui.extraNote = "";
+  try {
+    ui.extraNote = (await action()) ?? "";
+  } catch (err) {
+    if (err.name !== "NotAllowedError" && err.name !== "AbortError") ui.extraNote = err.name === "OperationError" ? t("errRecovery") : describe(err);
+  }
+  saveSettings();
+  paintSettings();
+}
+
+const EXTRAS = {
+  feed: async (on) => {
+    if (on) return void (await publishFeed());
+    await removeLink("feed", secret(SESSION_KEY));
+    settings.feed = "";
+  },
+  share: async (on) => {
+    if (on) {
+      settings.share = { key: randomKey(), ids: activeHabits().map((h) => h.id), token: "" };
+      return void (await publishShare());
+    }
+    await removeLink("share", secret(SESSION_KEY));
+    settings.share = null;
+  },
+  remind: async (on) => {
+    if (on) await sendReminders();
+    else await syncReminders(secret(SESSION_KEY), [], false);
+    settings.remind = on;
+  },
+};
+
+async function makeRecovery() {
+  const passphrase = secret(PASS_KEY);
+  if (passphrase.length < 8) return t("errWeakPassphrase");
+  const code = newRecoveryCode();
+  await saveRecovery(secret(SESSION_KEY), await wrap(passphrase, code));
+  return t("recoveryMade", { code: formatCode(code) });
+}
+
+async function useRecovery(code) {
+  let sealed;
+  try {
+    sealed = await readRecovery(secret(SESSION_KEY));
+  } catch (err) {
+    if (err.status === 404) return t("noRecovery");
+    throw err;
+  }
+  const passphrase = await unwrap(sealed, cleanCode(code));
+  $("#passphrase").value = passphrase;
+  saveSecret(PASS_KEY, passphrase);
+  ui.recovering = false;
+  store.sync();
+  return t("recovered");
+}
+
+function paintExtras() {
+  const on = inAccount();
+  $("#passkeyButtons").hidden = on || settings.mode !== "account" || !window.PublicKeyCredential;
+  $("#passkeyButtons").replaceChildren(
+    textButton(t("passkeySignIn"), () => passkeyAccount(usePasskey), { small: true }),
+    textButton(t("passkeyNew"), () => passkeyAccount(() => createPasskey()), { small: true }),
+  );
+
+  const toggle = (label, checked, onchange) => el("label", { class: "check" }, [el("input", { type: "checkbox", checked, onchange }), el("span", { textContent: label })]);
+  const address = (url) => el("input", { readOnly: true, value: url, "aria-label": t("linkAddress"), onfocus: (e) => e.target.select() });
+  const hint = (text) => el("p", { class: "hint", textContent: text });
+  const rows = [];
+  if (on) {
+    rows.push(el("div", { class: "row" }, [
+      window.PublicKeyCredential ? textButton(t("addPasskey"), () => extra(async () => (await createPasskey(secret(SESSION_KEY))) && t("passkeyAdded")), { small: true }) : null,
+      textButton(t("newRecovery"), () => extra(makeRecovery), { small: true }),
+    ]));
+    rows.push(toggle(t("feedToggle"), Boolean(settings.feed), (e) => extra(() => EXTRAS.feed(e.target.checked))));
+    if (settings.feed) rows.push(address(feedUrl(settings.feed)), hint(t("feedHint")));
+    rows.push(toggle(t("shareToggle"), Boolean(settings.share), (e) => extra(() => EXTRAS.share(e.target.checked))));
+    if (settings.share?.token) {
+      const pick = (id, shared) => extra(async () => {
+        settings.share.ids = shared ? [...settings.share.ids, id] : settings.share.ids.filter((x) => x !== id);
+        await publishShare();
+      });
+      const name = el("input", {
+        value: settings.share.name ?? "",
+        maxLength: 60,
+        placeholder: t("shareName"),
+        "aria-label": t("shareName"),
+        onchange: () => extra(async () => {
+          settings.share.name = name.value.trim();
+          await publishShare();
+        }),
+      });
+      rows.push(address(shareUrl()), hint(t("shareHint")), name, el("div", { class: "row" }, activeHabits().map((h) => toggle(habitName(h), settings.share.ids.includes(h.id), (e) => pick(h.id, e.target.checked)))));
+    }
+    if (canRemind()) rows.push(toggle(t("remindToggle"), Boolean(settings.remind), (e) => extra(() => EXTRAS.remind(e.target.checked))), hint(t("remindHint")));
+    if (ui.extraNote) rows.push(el("p", { class: "hint", role: "status", textContent: ui.extraNote }));
+  }
+  $("#accountExtras").replaceChildren(...rows);
+
+  const code = el("input", { placeholder: t("recoveryCode"), "aria-label": t("recoveryCode"), autocomplete: "off", spellcheck: false });
+  $("#recoveryBox").hidden = !on;
+  $("#recoveryBox").replaceChildren(
+    ...(ui.recovering
+      ? [code, el("button", { type: "button", class: "btn", textContent: t("recover"), onclick: () => extra(() => useRecovery(code.value)) })]
+      : [textButton(t("forgot"), () => {
+        ui.recovering = true;
+        paintSettings();
+      }, { small: true })]),
+  );
 }
 
 async function signOutAccount() {
@@ -835,6 +1474,10 @@ function clearDevice() {
   store.reset();
   for (const key of [SESSION_KEY, PASS_KEY, EMAIL_KEY]) saveSecret(key, "");
   $("#passphrase").value = "";
+  // Links stay published until turned off; this device only forgets them.
+  Object.assign(settings, { feed: "", share: null, remind: false });
+  ui.published = {};
+  ui.extraNote = "";
   settings.sub = "";
   saveSettings();
   paintSettings();
@@ -854,6 +1497,7 @@ function paintSettings() {
   const mode = settings.mode;
   const signedIn = Boolean(secret(SESSION_KEY));
   const email = secret(EMAIL_KEY);
+  paintExtras();
   $("#syncMode").value = mode;
   $("#noneHint").hidden = mode !== "none";
   $("#accountBlock").hidden = mode !== "account";
@@ -864,7 +1508,7 @@ function paintSettings() {
   $("#googleButton").hidden = signedIn;
   // An account's data stays on the device after its session ends, so Sign out stays reachable.
   $("#signedIn").hidden = !settings.sub;
-  $("#signedInAs").textContent = email ? t(signedIn ? "signedInAs" : "sessionEnded", { email }) : t("accountOnDevice");
+  $("#signedInAs").textContent = email ? t(signedIn ? "signedInAs" : "sessionEnded", { email }) : t(signedIn ? "signedInPasskey" : "accountOnDevice");
   const actions = {
     signOut: () => confirmButtons(t("signOutDiscard"), signOutAccount, paintSettings),
     deleteAccount: () => confirmButtons(t("deleteAccountConfirm"), removeAccount, paintSettings),
@@ -933,6 +1577,14 @@ function initSettings() {
     store.sync();
   });
   $("#exportData").addEventListener("click", exportData);
+  $("#calendarFile").addEventListener("click", () => download(new Blob([toIcs(data())], { type: "text/calendar" }), "habit-tracker.ics"));
+  const picker = $("#importFile");
+  $("#importData").addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => {
+    const [file] = picker.files;
+    picker.value = "";
+    if (file) importData(file);
+  });
   initInstall();
 
   paintSettings();
@@ -978,6 +1630,10 @@ document.addEventListener("visibilitychange", () => {
   render();
   store.refresh();
 });
+setInterval(() => {
+  const node = ui.timer && document.querySelector("[data-timer]");
+  if (node) node.textContent = timerLabel();
+}, 1000);
 navigator.serviceWorker?.register("sw.js").catch(() => {});
 paintStatus();
 await store.ready();

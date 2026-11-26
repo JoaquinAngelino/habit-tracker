@@ -37,7 +37,7 @@
       <label class="field">
         <span class="field-label" data-i18n="syncWith">Sync with</span>
         <select id="syncMode">
-          <option value="account" data-i18n="mode_account">Google account</option>
+          <option value="account" data-i18n="mode_account">Account</option>
           <option value="github" data-i18n="mode_github">GitHub repository</option>
           <option value="none" data-i18n="mode_none">This device only</option>
         </select>
@@ -46,10 +46,12 @@
       <div id="accountBlock" class="setting">
         <p id="accountHint" class="hint" data-i18n="accountHint"></p>
         <div id="googleButton"></div>
+        <div id="passkeyButtons" class="row"></div>
         <div id="signedIn" class="setting" hidden>
           <p id="signedInAs"></p>
           <p class="hint" data-i18n="signOutHint"></p>
           <div id="accountActions" class="row"></div>
+          <div id="accountExtras" class="setting"></div>
         </div>
       </div>
       <div id="githubBlock" class="setting">
@@ -83,11 +85,16 @@
         <button id="syncNow" type="button" class="btn" data-i18n="syncNow">Sync now</button>
         <button id="forget" type="button" class="btn-text btn-small" data-i18n="forget">Forget passphrase</button>
       </div>
+      <div id="recoveryBox" class="row"></div>
     </div>
     <div class="row">
       <button id="exportData" type="button" class="btn-text btn-small" data-i18n="exportData">Download my data</button>
+      <button id="importData" type="button" class="btn-text btn-small" data-i18n="importData">Import data</button>
+      <button id="calendarFile" type="button" class="btn-text btn-small" data-i18n="calendarFile">Download calendar</button>
+      <input id="importFile" type="file" accept=".json,.csv,application/json,text/csv" hidden>
       <button id="installApp" type="button" class="btn-text btn-small" data-i18n="installApp" hidden>Install app</button>
     </div>
+    <p id="importResult" class="hint" role="status" hidden></p>
   </section>
 
   <div id="banner" class="banner" role="alert" hidden></div>

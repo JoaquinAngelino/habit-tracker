@@ -167,9 +167,9 @@ test("a slip logged today ends an avoid habit's streak and counts against its ra
 });
 
 test("data from a newer version keeps its unknown fields and habit types", () => {
-  const data = normalize({ habits: [daily, { id: "z", type: "someday" }], log: {}, notes: ["kept"] });
+  const data = normalize({ habits: [daily, { id: "z", type: "someday" }], log: {}, extras: ["kept"] });
   assert.deepEqual(data.habits.map((h) => h.id), ["h", "z"]);
-  assert.deepEqual(data.notes, ["kept"]);
+  assert.deepEqual(data.extras, ["kept"]);
   assert.deepEqual(normalize(null), emptyData());
 });
 

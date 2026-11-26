@@ -11,18 +11,25 @@ const SHELL = [
   "icons/maskable-512.png",
   "icons/apple-touch-icon.png",
   "privacy.html",
+  "share.html",
   "terms.html",
   "src/app.js",
   "src/crypto.js",
+  "src/extras.js",
   "src/github.js",
   "src/http.js",
   "src/i18n.js",
+  "src/ics.js",
   "src/idb.js",
+  "src/importer.js",
+  "src/insights.js",
   "src/lib.js",
   "src/server.js",
+  "src/share.js",
   "src/storage.js",
   "src/store.js",
   "src/ui.js",
+  "src/viewer.js",
   "fonts/barlow-condensed-latin-600-normal.woff2",
   "fonts/barlow-condensed-latin-700-normal.woff2",
   "fonts/barlow-latin-400-normal.woff2",
@@ -50,4 +57,21 @@ self.addEventListener("fetch", (event) => {
       })
       .catch(async () => (await caches.match(request, { ignoreSearch: true })) ?? (request.mode === "navigate" ? caches.match("./") : Response.error())),
   );
+});
+
+// A reminder arrives with no text, so the server never holds any; the wording is the browser's language.
+self.addEventListener("push", (event) => {
+  const es = (self.navigator.language ?? "").startsWith("es");
+  event.waitUntil(
+    self.registration.showNotification(es ? "Mis hábitos" : "Habit Tracker", {
+      body: es ? "Es hora de tus hábitos." : "Time for your habits.",
+      icon: "icons/icon-192.png",
+      tag: "habits",
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(self.clients.matchAll({ type: "window" }).then((open) => (open[0] ? open[0].focus() : self.clients.openWindow("./"))));
 });

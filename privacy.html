@@ -26,10 +26,14 @@
 
     <h2>What the server stores</h2>
     <ul>
-      <li>Your Google account's unique ID and when the account was created.</li>
+      <li>Your Google account's unique ID and when the account was created. If you use a passkey instead, the passkey's ID and public key.</li>
       <li>Your habits and tasks, encrypted in your browser with your passphrase before they are sent. The server never receives the passphrase and cannot decrypt them.</li>
       <li>When your data was last saved, and a version number used to merge changes from several devices.</li>
       <li>A scrambled (hashed) copy of each sign-in session, which expires about 180 days after it was last used and is deleted after that.</li>
+      <li>If you create a recovery key: your passphrase, encrypted in your browser with that key. The server never receives the key.</li>
+      <li>If you share progress with a link: the streaks and recent days of the habits you chose, encrypted in your browser with a key that only the link holds.</li>
+      <li>If you publish a calendar link: the names and times of your habits and dated tasks, <strong>not encrypted</strong>. The server, and anyone who has the link, can read them. Turning the link off deletes them.</li>
+      <li>If you turn on reminders: your browser's push address and the times of day to send to. Reminders carry no text, and your browser's push service (Google, Mozilla, Apple or Microsoft) delivers them.</li>
     </ul>
 
     <h2>Syncing through GitHub instead</h2>
@@ -61,10 +65,14 @@
 
       <h2>Qué guarda el servidor</h2>
       <ul>
-        <li>El identificador único de tu cuenta de Google y cuándo se creó la cuenta.</li>
+        <li>El identificador único de tu cuenta de Google y cuándo se creó la cuenta. Si usas una llave de acceso, su identificador y su clave pública.</li>
         <li>Tus hábitos y tareas, cifrados en tu navegador con tu frase antes de enviarse. El servidor nunca recibe la frase y no puede descifrarlos.</li>
         <li>Cuándo se guardaron tus datos por última vez, y un número de versión para combinar cambios de varios dispositivos.</li>
         <li>Una copia codificada (hash) de cada sesión, que vence unos 180 días después de su último uso y se borra después.</li>
+        <li>Si creas una clave de recuperación: tu frase, cifrada en tu navegador con esa clave. El servidor nunca recibe la clave.</li>
+        <li>Si compartes el progreso con un enlace: las rachas y los días recientes de los hábitos que elegiste, cifrados en tu navegador con una clave que solo tiene el enlace.</li>
+        <li>Si publicas un enlace de calendario: los nombres y horarios de tus hábitos y tareas con fecha, <strong>sin cifrar</strong>. El servidor, y cualquiera que tenga el enlace, puede leerlos. Al desactivar el enlace se borran.</li>
+        <li>Si activas los recordatorios: la dirección de notificaciones de tu navegador y las horas del día a las que enviar. Los recordatorios no llevan texto, y los entrega el servicio de notificaciones de tu navegador (Google, Mozilla, Apple o Microsoft).</li>
       </ul>
 
       <h2>Sincronizar con GitHub</h2>

@@ -218,3 +218,149 @@ test("unknown key ids refetch Google's keys at most once a minute", async () => 
   assert.ok(fetches - before <= 1);
   globalThis.fetch = real;
 });
+
+// A stand-in authenticator: a P-256 key that signs what a browser would.
+const HOST_HASH = async (origin) => new Uint8Array(await crypto.subtle.digest("SHA-256", enc(new URL(origin).hostname)));
+
+async function newPasskey(id = "credential-0123456789") {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  return { id, pair, publicKey: b64url(new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey))) };
+}
+
+const challenge = async () => (await call("POST", "/passkey/challenge")).body.challenge;
+const clientJson = (type, value, origin = ORIGIN) => b64url(JSON.stringify({ type, challenge: value, origin }));
+
+function der(raw) {
+  const int = (bytes) => {
+    let b = [...bytes];
+    while (b.length > 1 && b[0] === 0) b.shift();
+    if (b[0] & 0x80) b = [0, ...b];
+    return [2, b.length, ...b];
+  };
+  const body = [...int(raw.slice(0, 32)), ...int(raw.slice(32))];
+  return new Uint8Array([0x30, body.length, ...body]);
+}
+
+async function assertion(passkey, { origin = ORIGIN, flags = 1, value } = {}) {
+  const clientDataJSON = clientJson("webauthn.get", value ?? (await challenge()), origin);
+  const authenticatorData = new Uint8Array([...(await HOST_HASH(origin)), flags, 0, 0, 0, 1]);
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", Buffer.from(clientDataJSON, "base64url")));
+  const raw = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, passkey.pair.privateKey, new Uint8Array([...authenticatorData, ...hash])));
+  return { credentialId: passkey.id, authenticatorData: b64url(authenticatorData), clientDataJSON, signature: b64url(der(raw)) };
+}
+
+const register = async (passkey, token) =>
+  call("POST", "/passkey/register", { token, body: { credentialId: passkey.id, publicKey: passkey.publicKey, clientDataJSON: clientJson("webauthn.create", await challenge()) } });
+
+test("a passkey makes an account and signs back in to it", async () => {
+  const passkey = await newPasskey();
+  const made = await register(passkey);
+  assert.equal(made.status, 200);
+  await put(made.body.token, 0, "mine");
+  const back = await call("POST", "/passkey/session", { body: await assertion(passkey) });
+  assert.deepEqual([back.status, back.body.userId], [200, made.body.userId]);
+  assert.equal((await get(back.body.token)).data, "mine");
+  assert.equal((await register(passkey)).status, 409);
+});
+
+test("a passkey added while signed in opens that same account", async () => {
+  const token = await signIn();
+  await put(token, 0, "google data");
+  const passkey = await newPasskey();
+  assert.equal((await register(passkey, token)).status, 200);
+  const back = await call("POST", "/passkey/session", { body: await assertion(passkey) });
+  assert.equal((await get(back.body.token)).data, "google data");
+  assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM users").get().n, 1);
+});
+
+test("passkey sign-in refuses a reused challenge, another site, a missing person, a wrong key and an unknown credential", async () => {
+  const passkey = await newPasskey();
+  await register(passkey);
+  const once = await assertion(passkey);
+  assert.equal((await call("POST", "/passkey/session", { body: once })).status, 200);
+  assert.equal((await call("POST", "/passkey/session", { body: once })).status, 401);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { origin: "https://evil.example" }) })).status, 401);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { flags: 0 }) })).status, 401);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { value: "made-up" }) })).status, 401);
+  const other = await newPasskey();
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion({ ...passkey, pair: other.pair }) })).status, 401);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion({ ...other, id: "credential-unknown-000" }) })).status, 401);
+  env.DB.sql.prepare("UPDATE challenges SET expires_at = 0").run();
+  const stale = await challenge();
+  env.DB.sql.prepare("UPDATE challenges SET expires_at = 1").run();
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { value: stale }) })).status, 401);
+});
+
+test("a published link is readable by anyone with its address, keeps the address when republished, and can be taken down", async () => {
+  const token = await signIn();
+  assert.equal((await call("PUT", "/link/feed", { bytes: enc("x") })).status, 401);
+  const first = await call("PUT", "/link/feed", { token, bytes: enc("BEGIN:VCALENDAR") });
+  assert.match(first.body.token, /^[\w-]{32}$/);
+  const read = await worker.fetch(new Request(`https://api.test/feed/${first.body.token}.ics`), env);
+  assert.deepEqual([read.status, read.headers.get("Content-Type"), await read.text()], [200, "text/calendar; charset=utf-8", "BEGIN:VCALENDAR"]);
+  assert.equal((await call("PUT", "/link/feed", { token, bytes: enc("again") })).body.token, first.body.token);
+  const share = await call("PUT", "/link/share", { token, bytes: enc("sealed") });
+  assert.notEqual(share.body.token, first.body.token);
+  assert.equal((await call("GET", `/share/${share.body.token}`)).data, "sealed");
+  assert.equal((await call("GET", `/share/${first.body.token}`)).status, 404);
+  assert.equal((await call("PUT", "/link/share", { token, bytes: new Uint8Array(300_001) })).status, 413);
+  assert.equal((await call("DELETE", "/link/feed", { token })).status, 204);
+  assert.equal((await call("GET", `/feed/${first.body.token}.ics`)).status, 404);
+});
+
+test("the recovery blob is kept per account and goes with it", async () => {
+  const token = await signIn();
+  assert.equal((await call("GET", "/recovery", { token })).status, 404);
+  assert.equal((await call("PUT", "/recovery", { token, bytes: enc("wrapped") })).status, 204);
+  assert.equal((await call("PUT", "/recovery", { token, bytes: enc("wrapped again") })).status, 204);
+  assert.equal((await call("GET", "/recovery", { token })).data, "wrapped again");
+  assert.equal((await call("GET", "/recovery", { token: await signIn({ sub: "someone-else" }) })).status, 404);
+  await call("PUT", "/link/feed", { token, bytes: enc("x") });
+  assert.equal((await call("DELETE", "/account", { token })).status, 204);
+  assert.deepEqual([env.DB.sql.prepare("SELECT COUNT(*) AS n FROM recovery").get().n, env.DB.sql.prepare("SELECT COUNT(*) AS n FROM links").get().n], [0, 0]);
+});
+
+test("reminders push, with no body, to the devices due that minute and forget the ones that are gone", async () => {
+  const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const jwk = await crypto.subtle.exportKey("jwk", keys.privateKey);
+  env.VAPID_PUBLIC_KEY = b64url(new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey)));
+  env.VAPID_PRIVATE_KEY = jwk.d;
+  env.VAPID_SUBJECT = "https://example.test/";
+  const token = await signIn();
+  const phone = "https://fcm.googleapis.com/fcm/send/phone";
+  const gone = "https://updates.push.services.mozilla.com/wpush/v2/gone";
+  assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: "https://evil.example/x", minutes: [1] } })).status, 400);
+  assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: phone, minutes: [1440] } })).status, 400);
+  assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: phone, minutes: [450, 450, 1200] } })).status, 204);
+  assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: gone, minutes: [450] } })).status, 204);
+
+  const sent = [];
+  const googleFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    sent.push({ url, init });
+    return new Response(null, { status: url === gone ? 410 : 201 });
+  };
+  const waits = [];
+  const tick = async (iso) => {
+    worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => waits.push(p) });
+    await Promise.all(waits);
+  };
+  try {
+    await tick("2026-11-24T07:31:00Z");
+    assert.equal(sent.length, 0);
+    await tick("2026-11-24T07:30:20Z");
+  } finally {
+    globalThis.fetch = googleFetch;
+  }
+  assert.deepEqual(sent.map((x) => x.url).sort(), [phone, gone].sort());
+  const { init } = sent.find((x) => x.url === phone);
+  assert.deepEqual([init.method, init.body, init.headers.TTL], ["POST", undefined, "3600"]);
+  const [, jwt, k] = /^vapid t=([\w.-]+), k=([\w-]+)$/.exec(init.headers.Authorization);
+  const [head, claims, signature] = jwt.split(".");
+  assert.equal(k, env.VAPID_PUBLIC_KEY);
+  assert.equal(JSON.parse(Buffer.from(claims, "base64url")).aud, "https://fcm.googleapis.com");
+  assert.equal(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, keys.publicKey, Buffer.from(signature, "base64url"), enc(`${head}.${claims}`)), true);
+  assert.deepEqual(env.DB.sql.prepare("SELECT endpoint, minute FROM reminders ORDER BY minute").all().map((r) => [r.endpoint, r.minute]), [[phone, 450], [phone, 1200]]);
+  assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: phone, minutes: [] } })).status, 204);
+  assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM reminders").get().n, 0);
+});

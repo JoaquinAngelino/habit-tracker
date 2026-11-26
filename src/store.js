@@ -291,6 +291,8 @@ export function createStore({ config, onChange, onStatus }) {
   }
 
   function touch(op) {
+    // Breaks and imports can change any habit's stats.
+    if (op.t === "pause" || op.t === "delPause" || op.t === "import") generation++;
     const id = op.t === "log" || op.t === "skip" || op.t === "delHabit" ? op.id : op.habit?.id;
     if (id) touched.set(id, (touched.get(id) ?? 0) + 1);
   }

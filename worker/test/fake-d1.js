@@ -11,6 +11,7 @@ export function fakeD1() {
     // D1 takes an ArrayBuffer for a BLOB; node:sqlite wants a typed array.
     bind: (...values) => statement(sql, values.map((v) => (v instanceof ArrayBuffer ? new Uint8Array(v) : v))),
     first: async () => db.prepare(sql).get(...args) ?? null,
+    all: async () => ({ results: db.prepare(sql).all(...args) }),
     run: async () => ({ meta: { changes: Number(db.prepare(sql).run(...args).changes) } }),
   });
   return {

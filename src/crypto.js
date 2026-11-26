@@ -78,3 +78,23 @@ export async function unseal(envelope, key) {
   // Format 1 was not compressed.
   return envelope.v === 1 ? JSON.parse(decoder.decode(plain)) : unpackJson(plain);
 }
+
+// A short text sealed under a secret of its own: a 16-byte salt, a 12-byte IV, then AES-GCM.
+const WRAP_IV_AT = 16;
+const WRAP_DATA_AT = WRAP_IV_AT + 12;
+
+export async function wrap(text, secret) {
+  const salt = newSalt();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await deriveKey(secret, salt, ITERATIONS), encoder.encode(text)));
+  const out = new Uint8Array(WRAP_DATA_AT + data.length);
+  out.set(salt);
+  out.set(iv, WRAP_IV_AT);
+  out.set(data, WRAP_DATA_AT);
+  return out;
+}
+
+export async function unwrap(bytes, secret) {
+  const key = await deriveKey(secret, bytes.slice(0, WRAP_IV_AT), ITERATIONS);
+  return decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(WRAP_IV_AT, WRAP_DATA_AT) }, key, bytes.slice(WRAP_DATA_AT)));
+}
