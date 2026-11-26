@@ -78,7 +78,7 @@ Create a fine-grained token limited to that repository with **Contents: Read and
 
 With an account, **Settings** also offers:
 
-- **Add a passkey**: a second way in to the same account. It works only within 10 minutes of signing in, and signs out the account's other devices, so a stolen session cannot quietly keep access. **Remove passkeys** takes them all off again. **New account with a passkey** makes an account with no Google sign-in at all.
+- **Add a passkey**: a second way in to the same account. It works only within 10 minutes of signing in, and signs out the account's other devices, so a stolen session cannot quietly keep access. **Remove passkeys** takes them all off again, under the same 10-minute rule. **New account with a passkey** makes an account with no Google sign-in at all.
 - **Create a recovery key**: 24 characters to write down. The passphrase is encrypted with it in the browser and kept on the server, and **Forgot the passphrase?** brings it back. Without a recovery key a lost passphrase is still unrecoverable. A new key replaces the old one, and changing the passphrase needs a new key.
 - **Share progress with a link**: the streaks, 30-day rate and last 12 weeks of the habits you tick, on a page anyone with the link can open. It is encrypted with a key that sits after the `#` of the link, which browsers do not send to servers. The page can follow several links at once, under each person's name, so a coach or a group sees everyone's progress together; the list is kept in that browser.
 - **Publish a calendar link**: an address calendar apps subscribe to, kept up to date after each sync. It is the one thing stored **unencrypted**: the server and anyone with the link can read the names and times of habits and dated tasks.
@@ -105,7 +105,7 @@ Versions are random, so a vault recreated after a deletion never matches one a d
 | `DELETE /account` | Deletes the account and its data |
 | `POST /passkey/challenge` | Returns a challenge, good once and for 5 minutes |
 | `POST /passkey/register` | Stores a passkey's public key: for a new account, or for the account of a session that began in the last 10 minutes, whose other sessions then end |
-| `GET /passkeys`, `DELETE /passkeys` | Counts an account's passkeys, and removes them all unless a passkey is its only way in |
+| `GET /passkeys`, `DELETE /passkeys` | Counts an account's passkeys, and removes them all, with the same 10-minute rule, unless a passkey is its only way in |
 | `POST /passkey/session` | Trades a passkey signature over a challenge for a session token |
 | `PUT /link/feed`, `PUT /link/share` | Publishes the body at an unguessable address and returns its token; again keeps the token |
 | `DELETE /link/feed`, `DELETE /link/share` | Takes it down |

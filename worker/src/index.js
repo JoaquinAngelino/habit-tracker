@@ -119,6 +119,11 @@ async function startSession(env, userId) {
 const origins = (env) => (env.ALLOWED_ORIGINS ?? "").split(",").map((o) => o.trim());
 const invalidPasskey = () => new HttpError(401, "Invalid passkey");
 
+// Changing how an account is entered takes a session that began moments ago, so a stolen one cannot do it.
+function requireFresh(session) {
+  if (!(session.createdAt > Date.now() - FRESH_SIGN_IN)) throw new HttpError(403, "Sign in again to change passkeys");
+}
+
 async function passkeyChallenge(env) {
   const challenge = b64url(crypto.getRandomValues(new Uint8Array(32)));
   const now = Date.now();
@@ -161,7 +166,7 @@ async function passkeyRegister(request, env) {
   if (await env.DB.prepare("SELECT 1 FROM passkeys WHERE credential_id = ?").bind(credentialId).first()) throw new HttpError(409, "That passkey is already registered");
   const now = Date.now();
   const session = request.headers.get("Authorization") ? await authenticate(request, env) : null;
-  if (session && !(session.createdAt > now - FRESH_SIGN_IN)) throw new HttpError(403, "Sign in again to add a passkey");
+  if (session) requireFresh(session);
   const userId = session?.userId ?? crypto.randomUUID();
   if (!session) await env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${credentialId}`, now).run();
   await env.DB.batch([
@@ -275,7 +280,9 @@ async function passkeyCount(env, userId) {
 }
 
 // An account made with a passkey has no other way in, so its passkeys stay.
-async function removePasskeys(env, userId, hash) {
+async function removePasskeys(env, session) {
+  requireFresh(session);
+  const { userId, hash } = session;
   const user = await env.DB.prepare("SELECT google_sub FROM users WHERE id = ?").bind(userId).first();
   if (user.google_sub.startsWith("passkey:")) throw new HttpError(409, "A passkey is the only way in to this account");
   await env.DB.batch([
@@ -403,7 +410,7 @@ const ROUTES = {
   "DELETE /link/feed": (request, url, env, { userId }) => deleteLink(env, userId, "feed"),
   "DELETE /link/share": (request, url, env, { userId }) => deleteLink(env, userId, "share"),
   "GET /passkeys": (request, url, env, { userId }) => passkeyCount(env, userId),
-  "DELETE /passkeys": (request, url, env, { userId, hash }) => removePasskeys(env, userId, hash),
+  "DELETE /passkeys": (request, url, env, session) => removePasskeys(env, session),
   "PUT /recovery": (request, url, env, { userId }) => writeRecovery(request, env, userId),
   "GET /recovery": (request, url, env, { userId }) => readRecovery(env, userId),
   "PUT /reminders": (request, url, env, { userId }) => writeReminders(request, env, userId),

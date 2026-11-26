@@ -276,6 +276,10 @@ test("a passkey added while signed in opens that same account", async () => {
   assert.equal((await get(back.body.token)).data, "google data");
   assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM users").get().n, 1);
   assert.equal((await call("GET", "/passkeys", { token: back.body.token })).body.count, 1);
+  env.DB.sql.prepare("UPDATE sessions SET created_at = ?").run(Date.now() - 11 * 60_000);
+  assert.equal((await call("DELETE", "/passkeys", { token: back.body.token })).status, 403);
+  assert.equal((await call("GET", "/passkeys", { token: back.body.token })).body.count, 1);
+  env.DB.sql.prepare("UPDATE sessions SET created_at = ?").run(Date.now());
   assert.equal((await call("DELETE", "/passkeys", { token: back.body.token })).status, 204);
   assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey) })).status, 401);
 });
