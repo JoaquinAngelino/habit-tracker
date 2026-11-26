@@ -9,7 +9,7 @@ import { local, session, read, write } from "./storage.js";
 import { fromB64, wrap, unwrap } from "./crypto.js";
 import { DEFAULT_BRANCH } from "./github.js";
 import { t, setLanguage, getLanguage, applyTranslations } from "./i18n.js";
-import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, publishLink, removeLink, feedUrl, saveRecovery, readRecovery } from "./server.js";
+import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, publishLink, removeLink, feedUrl, saveRecovery, readRecovery, passkeyCount, removePasskeys } from "./server.js";
 import { buildShare, randomKey, newRecoveryCode, cleanCode, formatCode, utcMinutes, canRemind, syncReminders, createPasskey, usePasskey } from "./extras.js";
 
 const CONFIG_KEY = "ht.config";
@@ -1420,6 +1420,12 @@ function paintExtras() {
     rows.push(el("div", { class: "row" }, [
       window.PublicKeyCredential ? textButton(t("addPasskey"), () => extra(async () => (await createPasskey(secret(SESSION_KEY))) && t("passkeyAdded")), { small: true }) : null,
       textButton(t("newRecovery"), () => extra(makeRecovery), { small: true }),
+      // Only an account with another way in can drop its passkeys.
+      secret(EMAIL_KEY) ? textButton(t("removePasskeys"), () => extra(async () => {
+        const { count } = await passkeyCount(secret(SESSION_KEY));
+        if (count) await removePasskeys(secret(SESSION_KEY));
+        return t("passkeysRemoved", { count });
+      }), { small: true }) : null,
     ]));
     rows.push(toggle(t("feedToggle"), Boolean(settings.feed), (e) => extra(() => EXTRAS.feed(e.target.checked))));
     if (settings.feed) rows.push(address(feedUrl(settings.feed)), hint(t("feedHint")));

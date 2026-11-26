@@ -220,3 +220,15 @@ test("CSV import reads check-in logs and exports that mark each entry completed 
   );
   assert.deepEqual([typed.log, typed.skips], [{ "2026-11-20": { x1: 1 } }, { "2026-11-22": { x1: 1 } }]);
 });
+
+test("the calendar file cannot be given lines of its own by imported data", () => {
+  const data = dataWith([
+    { ...daily, id: "a\r\nX-EVIL:1", name: "Read\rATTENDEE:mailto:x@example.com", time: "07:30\r\nX-EVIL:2", days: ["MO\r\nX-EVIL:3", 2], every: "2\r\nX-EVIL:4" },
+    { ...daily, id: "b", start: "2026-11-01\r\nX-EVIL:5" },
+  ]);
+  data.tasks.push({ id: "t", title: "Pay", due: "2026-12-01\nX-EVIL:6", done: "" });
+  const lines = toIcs(data).split("\r\n");
+  assert.equal(lines.some((line) => /^(X-EVIL|ATTENDEE)/.test(line)), false);
+  assert.equal(lines.filter((line) => line === "BEGIN:VEVENT").length, 1);
+  assert.deepEqual(lines.filter((line) => /^(UID|DTSTART|RRULE)/.test(line)), ["UID:habit-aX-EVIL1@habit-tracker", "DTSTART;VALUE=DATE:20261104", "RRULE:FREQ=WEEKLY;BYDAY=WE"]);
+});

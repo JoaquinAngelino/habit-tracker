@@ -28,7 +28,7 @@ async function fakeServer() {
   const token = "token-g1";
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
   env.DB.sql.prepare("INSERT INTO users VALUES ('u1', 'g1', 0)").run();
-  env.DB.sql.prepare("INSERT INTO sessions VALUES (?, 'u1', ?)").run([...digest].map((b) => b.toString(16).padStart(2, "0")).join(""), Date.now() + 86_400_000);
+  env.DB.sql.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, 'u1', ?)").run([...digest].map((b) => b.toString(16).padStart(2, "0")).join(""), Date.now() + 86_400_000);
   return { env, account: () => ({ mode: "account", target: "account:g1", ready: true, session: token, passphrase: "pass words here" }) };
 }
 

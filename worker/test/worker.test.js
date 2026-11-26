@@ -266,11 +266,27 @@ test("a passkey makes an account and signs back in to it", async () => {
 test("a passkey added while signed in opens that same account", async () => {
   const token = await signIn();
   await put(token, 0, "google data");
+  const elsewhere = await signIn();
   const passkey = await newPasskey();
-  assert.equal((await register(passkey, token)).status, 200);
+  const added = await register(passkey, token);
+  assert.deepEqual([added.status, added.body.token], [200, undefined]);
+  // Adding a way in ends the account's other sessions.
+  assert.equal((await get(elsewhere)).status, 401);
   const back = await call("POST", "/passkey/session", { body: await assertion(passkey) });
   assert.equal((await get(back.body.token)).data, "google data");
   assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM users").get().n, 1);
+  assert.equal((await call("GET", "/passkeys", { token: back.body.token })).body.count, 1);
+  assert.equal((await call("DELETE", "/passkeys", { token: back.body.token })).status, 204);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey) })).status, 401);
+});
+
+test("a session that is not fresh cannot add a passkey, and a passkey-only account keeps its passkey", async () => {
+  const token = await signIn();
+  env.DB.sql.prepare("UPDATE sessions SET created_at = ?").run(Date.now() - 11 * 60_000);
+  assert.equal((await register(await newPasskey(), token)).status, 403);
+  assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM passkeys").get().n, 0);
+  const made = await register(await newPasskey("credential-only-000000"));
+  assert.equal((await call("DELETE", "/passkeys", { token: made.body.token })).status, 409);
 });
 
 test("passkey sign-in refuses a reused challenge, another site, a missing person, a wrong key and an unknown credential", async () => {

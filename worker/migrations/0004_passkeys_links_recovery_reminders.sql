@@ -39,3 +39,7 @@ CREATE TABLE reminders (
 );
 
 CREATE INDEX reminders_minute ON reminders (minute);
+
+-- When each session began, so adding a way in can be limited to someone who has just signed in.
+-- Sessions from before this are treated as old.
+ALTER TABLE sessions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;

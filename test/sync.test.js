@@ -156,7 +156,7 @@ async function fakeServer() {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
     const hash = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
     env.DB.sql.prepare("INSERT OR IGNORE INTO users VALUES (?, ?, 0)").run(`user-${sub}`, sub);
-    env.DB.sql.prepare("INSERT INTO sessions VALUES (?, ?, ?)").run(hash, `user-${sub}`, Date.now() + 86_400_000);
+    env.DB.sql.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)").run(hash, `user-${sub}`, Date.now() + 86_400_000);
     return token;
   };
   return { env, sessionFor };

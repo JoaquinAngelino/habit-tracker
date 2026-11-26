@@ -12,6 +12,8 @@ const MAX_SESSIONS_PER_USER = 20;
 const MAX_LINK = 300_000;
 const MAX_RECOVERY = 4096;
 const CHALLENGE_TTL = 5 * 60_000;
+// A stolen session must not be able to mint a way in that outlives it.
+const FRESH_SIGN_IN = 10 * 60_000;
 const MAX_REMINDERS = 48;
 const P256 = { name: "ECDSA", namedCurve: "P-256" };
 const ES256 = { name: "ECDSA", hash: "SHA-256" };
@@ -109,7 +111,7 @@ async function startSession(env, userId) {
     env.DB.prepare(
       "DELETE FROM sessions WHERE user_id = ?1 AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE user_id = ?1 ORDER BY expires_at DESC LIMIT ?2)",
     ).bind(userId, MAX_SESSIONS_PER_USER - 1),
-    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)").bind(await sha256(token), userId, expiresAt),
+    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)").bind(await sha256(token), userId, expiresAt, now),
   ]);
   return { token, expiresAt };
 }
@@ -143,7 +145,8 @@ async function clientData(encoded, type, env) {
 }
 
 // No attestation is asked for, so the key is taken as the browser reports it: whoever registers a passkey
-// defines the account it opens. Sent with a session, it is added to that account instead.
+// defines the account it opens. Sent with a session that began in the last few minutes, it is added to that
+// account instead, and every other session of the account ends.
 async function passkeyRegister(request, env) {
   const { credentialId, publicKey, clientDataJSON } = await readJson(request);
   await clientData(clientDataJSON, "webauthn.create", env);
@@ -157,12 +160,15 @@ async function passkeyRegister(request, env) {
   }
   if (await env.DB.prepare("SELECT 1 FROM passkeys WHERE credential_id = ?").bind(credentialId).first()) throw new HttpError(409, "That passkey is already registered");
   const now = Date.now();
-  let userId = request.headers.get("Authorization") ? (await authenticate(request, env)).userId : null;
-  if (!userId) {
-    userId = crypto.randomUUID();
-    await env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${credentialId}`, now).run();
-  }
-  await env.DB.prepare("INSERT INTO passkeys (credential_id, user_id, public_key, created_at) VALUES (?, ?, ?, ?)").bind(credentialId, userId, key.buffer, now).run();
+  const session = request.headers.get("Authorization") ? await authenticate(request, env) : null;
+  if (session && !(session.createdAt > now - FRESH_SIGN_IN)) throw new HttpError(403, "Sign in again to add a passkey");
+  const userId = session?.userId ?? crypto.randomUUID();
+  if (!session) await env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${credentialId}`, now).run();
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO passkeys (credential_id, user_id, public_key, created_at) VALUES (?, ?, ?, ?)").bind(credentialId, userId, key.buffer, now),
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").bind(userId, session?.hash ?? ""),
+  ]);
+  if (session) return json({ userId });
   return json({ ...(await startSession(env, userId)), userId });
 }
 
@@ -211,12 +217,12 @@ async function authenticate(request, env) {
   if (!token) throw new HttpError(401, "Not signed in");
   const hash = await sha256(token);
   const now = Date.now();
-  const session = await env.DB.prepare("SELECT user_id, expires_at FROM sessions WHERE token_hash = ?").bind(hash).first();
+  const session = await env.DB.prepare("SELECT user_id, expires_at, created_at FROM sessions WHERE token_hash = ?").bind(hash).first();
   if (!session || session.expires_at <= now) throw new HttpError(401, "Not signed in");
   if (session.expires_at < now + SESSION_TTL - SESSION_RENEW_AFTER) {
     await env.DB.prepare("UPDATE sessions SET expires_at = ? WHERE token_hash = ?").bind(now + SESSION_TTL, hash).run();
   }
-  return { userId: session.user_id, hash };
+  return { userId: session.user_id, hash, createdAt: session.created_at };
 }
 
 const newVersion = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -262,6 +268,21 @@ async function writeVault(request, url, env, userId) {
   // The newer data comes back with the refusal, so the client can merge without another request.
   const current = await env.DB.prepare("SELECT version, envelope FROM vaults WHERE user_id = ?").bind(userId).first();
   return current ? blob(current.envelope, current.version, 409) : json({ error: "The data changed since it was read" }, 409);
+}
+
+async function passkeyCount(env, userId) {
+  return json(await env.DB.prepare("SELECT COUNT(*) AS count FROM passkeys WHERE user_id = ?").bind(userId).first());
+}
+
+// An account made with a passkey has no other way in, so its passkeys stay.
+async function removePasskeys(env, userId, hash) {
+  const user = await env.DB.prepare("SELECT google_sub FROM users WHERE id = ?").bind(userId).first();
+  if (user.google_sub.startsWith("passkey:")) throw new HttpError(409, "A passkey is the only way in to this account");
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM passkeys WHERE user_id = ?").bind(userId),
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").bind(userId, hash),
+  ]);
+  return new Response(null, { status: 204 });
 }
 
 async function body(request, max) {
@@ -381,6 +402,8 @@ const ROUTES = {
   "PUT /link/share": (request, url, env, { userId }) => writeLink(request, env, userId, "share"),
   "DELETE /link/feed": (request, url, env, { userId }) => deleteLink(env, userId, "feed"),
   "DELETE /link/share": (request, url, env, { userId }) => deleteLink(env, userId, "share"),
+  "GET /passkeys": (request, url, env, { userId }) => passkeyCount(env, userId),
+  "DELETE /passkeys": (request, url, env, { userId, hash }) => removePasskeys(env, userId, hash),
   "PUT /recovery": (request, url, env, { userId }) => writeRecovery(request, env, userId),
   "GET /recovery": (request, url, env, { userId }) => readRecovery(env, userId),
   "PUT /reminders": (request, url, env, { userId }) => writeReminders(request, env, userId),

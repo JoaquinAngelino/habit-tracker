@@ -9,6 +9,7 @@ const auth = (session) => (session ? { Authorization: `Bearer ${session}` } : {}
 
 function code(status, session) {
   if (status === 401 && session) return "errSignedOut";
+  if (status === 403) return "errFreshSignIn";
   if (status === 413) return "errTooLarge";
   if (status >= 500) return "errServer";
   return undefined;
@@ -35,6 +36,8 @@ export const signOut = (session) => call("/session", { method: "DELETE", session
 export const deleteAccount = (session) => call("/account", { method: "DELETE", session });
 export const passkeyChallenge = () => call("/passkey/challenge", { method: "POST" });
 export const passkeyRegister = (body, session) => call("/passkey/register", { method: "POST", body, session });
+export const passkeyCount = (session) => call("/passkeys", { session });
+export const removePasskeys = (session) => call("/passkeys", { method: "DELETE", session });
 export const passkeySignIn = (body) => call("/passkey/session", { method: "POST", body });
 export const setReminders = (session, endpoint, minutes) => call("/reminders", { method: "PUT", session, body: { endpoint, minutes } });
 
