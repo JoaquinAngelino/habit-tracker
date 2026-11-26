@@ -18,14 +18,18 @@ export const uid = () => Math.random().toString(36).slice(2, 10);
 
 export const emptyData = () => ({ v: 1, habits: [], log: {}, goals: [], tasks: [] });
 
+// Unknown fields and habit types are kept, so an older version never drops what a newer one saved.
 export function normalize(data) {
-  const out = emptyData();
-  if (!data || typeof data !== "object") return out;
-  if (Array.isArray(data.habits)) out.habits = data.habits.filter((h) => h?.id && TYPES.includes(h.type));
-  if (Array.isArray(data.goals)) out.goals = data.goals.filter((g) => g?.id && g.habitId);
-  if (Array.isArray(data.tasks)) out.tasks = data.tasks.filter((x) => x?.id);
-  if (data.log && typeof data.log === "object") out.log = data.log;
-  return out;
+  if (!data || typeof data !== "object") return emptyData();
+  const list = (items) => (Array.isArray(items) ? items : []);
+  return {
+    ...data,
+    v: 1,
+    habits: list(data.habits).filter((h) => h?.id),
+    goals: list(data.goals).filter((g) => g?.id && g.habitId),
+    tasks: list(data.tasks).filter((x) => x?.id),
+    log: data.log && typeof data.log === "object" ? data.log : {},
+  };
 }
 
 export const entry = (data, id, date) => data.log[date]?.[id] ?? 0;
@@ -45,40 +49,43 @@ const PERIODS = {
   month: { start: monthStart, next: (d) => monthStart(addDays(d, 32)), prev: (d) => monthStart(addDays(d, -1)) },
 };
 
-export const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
+const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
 
 // Times logged in the week or month that holds `date`; a day can count more than once.
 export function periodCount(data, habit, date) {
   const p = PERIODS[periodOf(habit)];
   const start = p.start(date);
+  const end = p.next(start);
   let n = 0;
-  for (let d = start; d < p.next(start); d = addDays(d, 1)) n += entry(data, habit.id, d);
+  for (let d = start; d < end; d = addDays(d, 1)) n += entry(data, habit.id, d);
   return n;
 }
 
 // Weekly and monthly habits are measured per period, keyed by its first day; the rest per day.
-function units(habit, from, to) {
+function periodRange(habit, from, to) {
   const p = PERIODS[periodOf(habit)];
   return { p, first: p.start(later(from, habit.start)), last: p.start(to) };
 }
 
-function unitMet(data, habit, date) {
+function periodMet(data, habit, date) {
   if (periodOf(habit) !== "day") return periodCount(data, habit, date) >= (habit.target || 1);
   return isDone(habit, entry(data, habit.id, date));
 }
 
-// The current period counts only once met, so an unfinished today does not break a streak.
+// An unfinished current period does not break a streak yet; a slip on an avoid habit is final.
+const stillOpen = (data, habit, last) => habit.type !== "avoid" && !periodMet(data, habit, last);
+
 export function streak(data, habit, today) {
-  const { p, first, last } = units(habit, habit.start, today);
+  const { p, first, last } = periodRange(habit, habit.start, today);
   let best = 0;
   let run = 0;
   for (let d = first; d <= last; d = p.next(d)) {
-    run = unitMet(data, habit, d) ? run + 1 : 0;
+    run = periodMet(data, habit, d) ? run + 1 : 0;
     best = Math.max(best, run);
   }
   let current = 0;
-  let d = unitMet(data, habit, last) ? last : p.prev(last);
-  while (d >= first && unitMet(data, habit, d)) {
+  let d = stillOpen(data, habit, last) ? p.prev(last) : last;
+  while (d >= first && periodMet(data, habit, d)) {
     current++;
     d = p.prev(d);
   }
@@ -86,12 +93,12 @@ export function streak(data, habit, today) {
 }
 
 export function rate(data, habit, today, days) {
-  const { p, first, last } = units(habit, addDays(today, -(days - 1)), today);
+  const { p, first, last } = periodRange(habit, addDays(today, -(days - 1)), today);
   let hit = 0;
   let total = 0;
   for (let d = first; d <= last; d = p.next(d)) {
-    const met = unitMet(data, habit, d);
-    if (d === last && !met) continue;
+    if (d === last && stillOpen(data, habit, d)) continue;
+    const met = periodMet(data, habit, d);
     total++;
     if (met) hit++;
   }
@@ -157,21 +164,30 @@ export function applyOp(data, op) {
     upsert(data.tasks, op.task);
   } else if (op.t === "delTask") {
     data.tasks = data.tasks.filter((x) => x.id !== op.id);
+  } else if (op.t === "delTasks") {
+    const ids = new Set(op.ids);
+    data.tasks = data.tasks.filter((x) => !ids.has(x.id));
   }
   return data;
 }
 
 export const replay = (base, ops) => ops.reduce(applyOp, structuredClone(base));
 
-// Everything in `data` as edits, so replaying them merges it into other data.
-export function toOps(data) {
-  return [
-    ...data.habits.map((habit) => ({ t: "habit", habit })),
-    ...data.goals.map((goal) => ({ t: "goal", goal })),
-    ...data.tasks.map((task) => ({ t: "task", task })),
-    ...Object.entries(data.log).flatMap(([date, day]) => Object.entries(day).map(([id, v]) => ({ t: "log", date, id, v }))),
-  ];
+// `device` added into `base`: its habits, goals and tasks replace those with the same id, and its log entries win.
+export function merge(base, device) {
+  const out = structuredClone(base);
+  for (const kind of ["habits", "goals", "tasks"]) {
+    const at = new Map(out[kind].map((item, i) => [item.id, i]));
+    for (const item of device[kind]) {
+      if (at.has(item.id)) out[kind][at.get(item.id)] = item;
+      else at.set(item.id, out[kind].push(item) - 1);
+    }
+  }
+  for (const [date, day] of Object.entries(device.log)) out.log[date] = { ...out.log[date], ...day };
+  return out;
 }
+
+export const hasData = (data) => Boolean(data.habits.length || data.tasks.length || data.goals.length || Object.keys(data.log).length);
 
 function opKey(op) {
   if (op.t === "log") return `log:${op.date}:${op.id}`;

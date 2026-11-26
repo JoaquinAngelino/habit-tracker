@@ -42,8 +42,8 @@ beforeEach(() => {
   env = { DB: fakeD1(), GOOGLE_CLIENT_ID: CLIENT_ID, ALLOWED_ORIGINS: `${ORIGIN},http://localhost:8765` };
 });
 
-async function call(method, path, { token, body, bytes, origin = ORIGIN } = {}) {
-  const headers = { Origin: origin };
+async function call(method, path, { token, body, bytes, origin = ORIGIN, headers: extra = {} } = {}) {
+  const headers = { Origin: origin, ...extra };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (bytes !== undefined) headers["Content-Type"] = "application/octet-stream";
@@ -58,7 +58,8 @@ async function call(method, path, { token, body, bytes, origin = ORIGIN } = {}) 
 }
 
 const enc = (s) => new TextEncoder().encode(s);
-const put = (token, version, data) => call("PUT", `/vault?version=${version}`, { token, bytes: enc(data) });
+const put = (token, version, data) => call("PUT", "/vault", { token, bytes: enc(data), headers: { "X-Version": String(version) } });
+const get = (token, have) => call("GET", "/vault", { token, headers: have ? { "X-Have": have } : {} });
 
 async function signIn(claims) {
   const res = await call("POST", "/session", { body: { credential: await idToken(claims) } });
@@ -70,16 +71,18 @@ test("a signed-in user saves and reads their encrypted data with version checks"
   const token = await signIn();
   assert.equal((await call("GET", "/vault", { token })).status, 404);
 
-  assert.equal((await put(token, 0, "one")).version, "1");
-  const first = await call("GET", "/vault", { token });
-  assert.deepEqual([first.version, first.data], ["1", "one"]);
+  const v1 = (await put(token, 0, "one")).version;
+  assert.match(v1, /^[0-9a-f]{16}$/);
+  const first = await get(token);
+  assert.deepEqual([first.version, first.data], [v1, "one"]);
   assert.equal(env.DB.sql.prepare("SELECT typeof(envelope) AS t FROM vaults").get().t, "blob");
 
   // Another device that read nothing, or an older version, is refused instead of overwriting.
   assert.equal((await put(token, 0, "stale")).status, 409);
-  assert.equal((await put(token, 1, "two")).version, "2");
-  assert.equal((await put(token, 1, "stale")).status, 409);
-  assert.equal((await call("GET", "/vault", { token })).data, "two");
+  const v2 = (await put(token, v1, "two")).version;
+  assert.notEqual(v2, v1);
+  assert.equal((await put(token, v1, "stale")).status, 409);
+  assert.equal((await get(token)).data, "two");
 });
 
 test("signing in twice with the same Google account reaches the same data", async () => {
@@ -142,7 +145,7 @@ test("deleting the account removes the user, sessions and data", async () => {
 
 test("bad writes are refused", async () => {
   const token = await signIn();
-  assert.equal((await put(token, "x", "data")).status, 400);
+  assert.equal((await put(token, "not a version", "data")).status, 400);
   assert.equal((await call("PUT", "/vault", { token, bytes: enc("data") })).status, 400);
   assert.equal((await put(token, 0, "")).status, 400);
   assert.equal((await put(token, 0, "x".repeat(1_000_001))).status, 413);
@@ -169,13 +172,49 @@ test("sign-in is refused until a Google client ID is configured", async () => {
 
 test("a client that already has the current version gets no data back, and a conflict returns the newer data", async () => {
   const token = await signIn();
-  await put(token, 0, "one");
-  const same = await call("GET", "/vault?have=1", { token });
-  assert.deepEqual([same.status, same.version, same.body], [204, "1", null]);
-  await put(token, 1, "two");
-  const newer = await call("GET", "/vault?have=1", { token });
-  assert.deepEqual([newer.status, newer.version, newer.data], [200, "2", "two"]);
+  const v1 = (await put(token, 0, "one")).version;
+  const same = await get(token, v1);
+  assert.deepEqual([same.status, same.version, same.body], [204, v1, null]);
+  const v2 = (await put(token, v1, "two")).version;
+  const newer = await get(token, v1);
+  assert.deepEqual([newer.status, newer.version, newer.data], [200, v2, "two"]);
 
-  const conflict = await put(token, 1, "stale");
-  assert.deepEqual([conflict.status, conflict.version, conflict.data], [409, "2", "two"]);
+  const conflict = await put(token, v1, "stale");
+  assert.deepEqual([conflict.status, conflict.version, conflict.data], [409, v2, "two"]);
+  // Clients from before headers sent the version in the query string.
+  assert.equal((await call("GET", `/vault?have=${v2}`, { token })).status, 204);
+});
+
+test("a recreated vault never matches a version a device still holds", async () => {
+  const token = await signIn();
+  const old = (await put(token, 0, "before")).version;
+  await call("DELETE", "/account", { token });
+  const again = await signIn();
+  await put(again, 0, "after");
+  assert.equal((await get(again, old)).data, "after");
+  assert.equal((await put(again, old, "stale")).status, 409);
+});
+
+test("a vault stored as text by an older worker is served as its bytes", async () => {
+  const token = await signIn();
+  await put(token, 0, "x");
+  env.DB.sql.exec(`UPDATE vaults SET envelope = '{"v":2}'`);
+  assert.equal((await get(token)).data, '{"v":2}');
+});
+
+test("each account keeps at most 20 sessions", async () => {
+  for (let i = 0; i < 25; i++) await signIn();
+  assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM sessions").get().n, 20);
+});
+
+test("unknown key ids refetch Google's keys at most once a minute", async () => {
+  let fetches = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url) => (fetches++, real(url));
+  await signIn();
+  const before = fetches;
+  const header = b64url(JSON.stringify({ alg: "RS256", kid: "unknown", typ: "JWT" }));
+  for (let i = 0; i < 5; i++) await call("POST", "/session", { body: { credential: `${header}.e30.x` } });
+  assert.ok(fetches - before <= 1);
+  globalThis.fetch = real;
 });

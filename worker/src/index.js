@@ -6,6 +6,9 @@ const MAX_ENVELOPE = 1_000_000;
 const GOOGLE_CERTS = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"];
 const CLOCK_SKEW = 60_000;
+// An unknown key id refetches Google's keys at most this often, so forged tokens cannot hammer Google.
+const CERTS_REFETCH_AFTER = 60_000;
+const MAX_SESSIONS_PER_USER = 20;
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -26,15 +29,16 @@ async function sha256(text) {
   return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-let certs = { keys: [], until: 0 };
+let certs = { keys: [], until: 0, fetchedAt: 0 };
 
 async function googleKey(kid) {
   const find = () => certs.keys.find((k) => k.kid === kid);
-  if (Date.now() < certs.until && find()) return find();
+  const now = Date.now();
+  if (now < certs.until && (find() || now - certs.fetchedAt < CERTS_REFETCH_AFTER)) return find();
   const res = await fetch(GOOGLE_CERTS);
   if (!res.ok) throw new HttpError(502, "Could not reach Google");
   const maxAge = Number(/max-age=(\d+)/.exec(res.headers.get("Cache-Control") ?? "")?.[1] ?? 3600);
-  certs = { keys: (await res.json()).keys ?? [], until: Date.now() + maxAge * 1000 };
+  certs = { keys: (await res.json()).keys ?? [], until: now + maxAge * 1000, fetchedAt: now };
   return find();
 }
 
@@ -88,6 +92,9 @@ async function signIn(request, env) {
   const expiresAt = now + SESSION_TTL;
   await env.DB.batch([
     env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now),
+    env.DB.prepare(
+      "DELETE FROM sessions WHERE user_id = ?1 AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE user_id = ?1 ORDER BY expires_at DESC LIMIT ?2)",
+    ).bind(user.id, MAX_SESSIONS_PER_USER - 1),
     env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)").bind(await sha256(token), user.id, expiresAt),
   ]);
   return json({ token, expiresAt });
@@ -106,38 +113,46 @@ async function authenticate(request, env) {
   return { userId: session.user_id, hash };
 }
 
-const blob = (bytes, version, status = 200) =>
-  new Response(new Uint8Array(bytes), { status, headers: { "Content-Type": "application/octet-stream", "X-Version": String(version) } });
+const newVersion = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// D1 returns a BLOB as an array of numbers; a TEXT value can only be an envelope stored as JSON.
+const toBytes = (value) => (typeof value === "string" ? encoder.encode(value) : new Uint8Array(value));
+
+const blob = (envelope, version, status = 200) =>
+  new Response(toBytes(envelope), { status, headers: { "Content-Type": "application/octet-stream", "X-Version": version } });
+
+// Versions come in headers; the query string is the form clients used before.
+const versionFrom = (request, url, header, param) => request.headers.get(header) ?? url.searchParams.get(param) ?? "";
 
 // A client that already has version `have` gets only the version back while it is still current.
-async function readVault(url, env, userId) {
-  const have = Number(url.searchParams.get("have")) || 0;
+async function readVault(request, url, env, userId) {
+  const have = versionFrom(request, url, "X-Have", "have");
   const vault = await env.DB.prepare("SELECT version, CASE WHEN version = ? THEN NULL ELSE envelope END AS envelope FROM vaults WHERE user_id = ?")
     .bind(have, userId)
     .first();
   if (!vault) return json({ error: "No data yet" }, 404);
-  if (vault.envelope == null) return new Response(null, { status: 204, headers: { "X-Version": String(vault.version) } });
+  if (vault.envelope == null) return new Response(null, { status: 204, headers: { "X-Version": vault.version } });
   return blob(vault.envelope, vault.version);
 }
 
-// `version` is the one the client last read (0 for none); a write over a newer version is refused.
+// `version` is the one the client last read ("0" for none); a write over any other version is refused.
 async function writeVault(request, url, env, userId) {
-  const raw = url.searchParams.get("version") ?? "";
-  if (!/^\d+$/.test(raw)) throw new HttpError(400, "Expected a version");
-  const version = Number(raw);
+  const version = versionFrom(request, url, "X-Version", "version");
+  if (!/^[\w-]{1,64}$/.test(version)) throw new HttpError(400, "Expected a version");
   if (Number(request.headers.get("Content-Length")) > MAX_ENVELOPE) throw new HttpError(413, "Data is too large");
   const envelope = await request.arrayBuffer();
   if (!envelope.byteLength) throw new HttpError(400, "Expected the encrypted data");
   if (envelope.byteLength > MAX_ENVELOPE) throw new HttpError(413, "Data is too large");
   const now = Date.now();
-  const result = version === 0
-    ? await env.DB.prepare("INSERT INTO vaults (user_id, version, envelope, updated_at) VALUES (?, 1, ?, ?) ON CONFLICT (user_id) DO NOTHING")
-      .bind(userId, envelope, now)
+  const next = newVersion();
+  const result = version === "0"
+    ? await env.DB.prepare("INSERT INTO vaults (user_id, version, envelope, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (user_id) DO NOTHING")
+      .bind(userId, next, envelope, now)
       .run()
-    : await env.DB.prepare("UPDATE vaults SET version = version + 1, envelope = ?, updated_at = ? WHERE user_id = ? AND version = ?")
-      .bind(envelope, now, userId, version)
+    : await env.DB.prepare("UPDATE vaults SET version = ?, envelope = ?, updated_at = ? WHERE user_id = ? AND version = ?")
+      .bind(next, envelope, now, userId, version)
       .run();
-  if (result.meta.changes === 1) return new Response(null, { status: 204, headers: { "X-Version": String(version + 1) } });
+  if (result.meta.changes === 1) return new Response(null, { status: 204, headers: { "X-Version": next } });
   // The newer data comes back with the refusal, so the client can merge without another request.
   const current = await env.DB.prepare("SELECT version, envelope FROM vaults WHERE user_id = ?").bind(userId).first();
   return current ? blob(current.envelope, current.version, 409) : json({ error: "The data changed since it was read" }, 409);
@@ -152,20 +167,23 @@ async function deleteAccount(env, userId) {
   return new Response(null, { status: 204 });
 }
 
-async function route(request, env) {
-  const url = new URL(request.url);
-  const { pathname } = url;
-  const key = `${request.method} ${pathname}`;
-  if (key === "POST /session") return signIn(request, env);
-  if (!["DELETE /session", "GET /vault", "PUT /vault", "DELETE /account"].includes(key)) throw new HttpError(404, "Not found");
-  const { userId, hash } = await authenticate(request, env);
-  if (key === "DELETE /session") {
+const ROUTES = {
+  "DELETE /session": async (request, url, env, { hash }) => {
     await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(hash).run();
     return new Response(null, { status: 204 });
-  }
-  if (key === "GET /vault") return readVault(url, env, userId);
-  if (key === "PUT /vault") return writeVault(request, url, env, userId);
-  return deleteAccount(env, userId);
+  },
+  "GET /vault": (request, url, env, { userId }) => readVault(request, url, env, userId),
+  "PUT /vault": (request, url, env, { userId }) => writeVault(request, url, env, userId),
+  "DELETE /account": (request, url, env, { userId }) => deleteAccount(env, userId),
+};
+
+async function route(request, env) {
+  const url = new URL(request.url);
+  const key = `${request.method} ${url.pathname}`;
+  if (key === "POST /session") return signIn(request, env);
+  const handler = ROUTES[key];
+  if (!handler) throw new HttpError(404, "Not found");
+  return handler(request, url, env, await authenticate(request, env));
 }
 
 function corsHeaders(origin, env) {
@@ -174,7 +192,7 @@ function corsHeaders(origin, env) {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Have, X-Version",
     "Access-Control-Expose-Headers": "X-Version",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",

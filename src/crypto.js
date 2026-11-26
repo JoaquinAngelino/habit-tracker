@@ -1,10 +1,15 @@
 export const ITERATIONS = 600_000;
+// Iteration counts come from the file; outside this range a hostile file could freeze every device.
+const MIN_ITERATIONS = 100_000;
+const MAX_ITERATIONS = 2_000_000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 // Format 3 layout: format byte, iterations (uint32), 16-byte salt, 12-byte IV, then AES-GCM over gzipped JSON.
 const FORMAT = 3;
-const HEADER = 1 + 4 + 16 + 12;
+const SALT_AT = 5;
+const IV_AT = SALT_AT + 16;
+const HEADER = IV_AT + 12;
 
 export const toB64 = (bytes) => {
   let s = "";
@@ -19,7 +24,7 @@ export const unpackJson = async (bytes) => JSON.parse(decoder.decode(await pipe(
 
 export const newSalt = () => crypto.getRandomValues(new Uint8Array(16));
 
-export async function deriveKey(passphrase, salt, iterations = ITERATIONS) {
+export async function deriveKey(passphrase, salt, iterations) {
   const base = await crypto.subtle.importKey("raw", encoder.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
     { name: "PBKDF2", hash: "SHA-256", salt, iterations },
@@ -30,22 +35,28 @@ export async function deriveKey(passphrase, salt, iterations = ITERATIONS) {
   );
 }
 
-export async function seal(value, key, salt, iterations = ITERATIONS) {
+export async function seal(value, key, salt, iterations) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   // Compressed before encrypting, since ciphertext does not compress.
   const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, await packJson(value)));
   const out = new Uint8Array(HEADER + data.length);
   out[0] = FORMAT;
   new DataView(out.buffer).setUint32(1, iterations);
-  out.set(salt, 5);
-  out.set(iv, 21);
+  out.set(salt, SALT_AT);
+  out.set(iv, IV_AT);
   out.set(data, HEADER);
   return out;
 }
 
-const unrecognized = () => Object.assign(new Error("Unrecognized data file format."), { code: "errFormat" });
+const unrecognized = () => Object.assign(new Error("Unrecognized data file format"), { code: "errFormat" });
 
 export function readEnvelope(bytes) {
+  const envelope = parseEnvelope(bytes);
+  if (!(envelope.iterations >= MIN_ITERATIONS && envelope.iterations <= MAX_ITERATIONS)) throw unrecognized();
+  return envelope;
+}
+
+function parseEnvelope(bytes) {
   // Formats 1 and 2 were JSON text with base64 fields; GitHub branches may still hold them.
   if (bytes[0] === 0x7b) {
     let e;
@@ -59,7 +70,7 @@ export function readEnvelope(bytes) {
   }
   if (bytes[0] !== FORMAT || bytes.length <= HEADER) throw unrecognized();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return { v: FORMAT, iterations: view.getUint32(1), salt: bytes.slice(5, 21), iv: bytes.slice(21, HEADER), data: bytes.slice(HEADER) };
+  return { v: FORMAT, iterations: view.getUint32(1), salt: bytes.slice(SALT_AT, IV_AT), iv: bytes.slice(IV_AT, HEADER), data: bytes.slice(HEADER) };
 }
 
 export async function unseal(envelope, key) {

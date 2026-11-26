@@ -19,7 +19,9 @@ export const STRINGS = {
       "A fine-grained token for this one repository with <strong>Contents: Read and write</strong>. It is sent only to <code>api.github.com</code>.",
     passphrase: "Passphrase",
     passphraseHint:
-      "Encrypts your habits before they leave this device, and must be the same on every device. Use four or more random words: a GitHub repository is public, so anyone can try to guess it. If you lose it, the data cannot be recovered.",
+      "Encrypts your habits before they leave this device, and must be the same on every device. Use at least 8 characters, ideally four or more random words. If you lose it, the data cannot be recovered.",
+    passphraseHint_github:
+      "Encrypts your habits before they leave this device, and must be the same on every device. Use four or more random words: if the repository is public, anyone can download the file and try to guess it. If you lose it, the data cannot be recovered.",
     remember: "Remember passphrase and sign-in on this device",
     syncNow: "Sync now",
     forget: "Forget passphrase and token",
@@ -30,6 +32,9 @@ export const STRINGS = {
     noneHint: "Habits stay in this browser only. Clearing its data deletes them.",
     accountHint: "Sign in to keep your habits on all your devices. They are encrypted with your passphrase before they leave this one, so not even the server can read them.",
     signedInAs: "Signed in as {email}",
+    sessionEnded: "The session for {email} ended. Sign in again to sync, or sign out to remove its data from this device.",
+    accountOnDevice: "An account's data is on this device. Sign in again to sync, or sign out to remove it.",
+    exportData: "Download my data",
     signOut: "Sign out",
     signOutHint: "Signing out removes your habits, tasks and passphrase from this device. They stay in your account.",
     signOutDiscard: "Sign out and discard unsaved changes",
@@ -51,6 +56,8 @@ export const STRINGS = {
     errSignedOut: "You were signed out. Sign in again in Settings.",
     errServer: "The sync server failed. Try again later.",
     errSignIn: "Sign-in failed: {message}",
+    errTooLarge: "Your data is too large for the sync server.",
+    errWeakPassphrase: "Use a passphrase of at least 8 characters.",
 
     type_check: "Daily",
     type_weekly: "Weekly",
@@ -182,6 +189,8 @@ export const STRINGS = {
     deleteTask: "Delete task",
     doneTasks: "Done",
     clearDone: "Clear done",
+    showAll: "Show all {count}",
+    showFewer: "Show fewer",
     clearConfirm_one: "Delete 1 done task",
     clearConfirm_other: "Delete {count} done tasks",
   },
@@ -205,7 +214,9 @@ export const STRINGS = {
       "Un token fine-grained solo para este repositorio, con <strong>Contents: Read and write</strong>. Solo se envía a <code>api.github.com</code>.",
     passphrase: "Frase de contraseña",
     passphraseHint:
-      "Cifra tus hábitos antes de que salgan de este dispositivo, y tiene que ser la misma en todos. Usá cuatro o más palabras al azar: un repositorio de GitHub es público, así que cualquiera puede intentar adivinarla. Si la perdés, los datos no se pueden recuperar.",
+      "Cifra tus hábitos antes de que salgan de este dispositivo, y tiene que ser la misma en todos. Usá al menos 8 caracteres, idealmente cuatro o más palabras al azar. Si la perdés, los datos no se pueden recuperar.",
+    passphraseHint_github:
+      "Cifra tus hábitos antes de que salgan de este dispositivo, y tiene que ser la misma en todos. Usá cuatro o más palabras al azar: si el repositorio es público, cualquiera puede descargar el archivo e intentar adivinarla. Si la perdés, los datos no se pueden recuperar.",
     remember: "Recordar frase y sesión en este dispositivo",
     syncNow: "Sincronizar ahora",
     forget: "Olvidar frase y token",
@@ -216,6 +227,9 @@ export const STRINGS = {
     noneHint: "Los hábitos quedan solo en este navegador. Si borrás sus datos, se pierden.",
     accountHint: "Iniciá sesión para tener tus hábitos en todos tus dispositivos. Se cifran con tu frase antes de salir de este, así que ni el servidor puede leerlos.",
     signedInAs: "Sesión iniciada como {email}",
+    sessionEnded: "La sesión de {email} terminó. Volvé a iniciar sesión para sincronizar, o cerrá sesión para borrar sus datos de este dispositivo.",
+    accountOnDevice: "Hay datos de una cuenta en este dispositivo. Volvé a iniciar sesión para sincronizar, o cerrá sesión para borrarlos.",
+    exportData: "Descargar mis datos",
     signOut: "Cerrar sesión",
     signOutHint: "Al cerrar sesión se borran de este dispositivo tus hábitos, tareas y frase. Siguen en tu cuenta.",
     signOutDiscard: "Cerrar sesión y descartar cambios sin guardar",
@@ -237,6 +251,8 @@ export const STRINGS = {
     errSignedOut: "Se cerró tu sesión. Volvé a iniciarla en Ajustes.",
     errServer: "Falló el servidor de sincronización. Probá más tarde.",
     errSignIn: "No se pudo iniciar sesión: {message}",
+    errTooLarge: "Tus datos son demasiado grandes para el servidor de sincronización.",
+    errWeakPassphrase: "Usá una frase de al menos 8 caracteres.",
 
     type_check: "Diario",
     type_weekly: "Semanal",
@@ -368,12 +384,12 @@ export const STRINGS = {
     deleteTask: "Borrar tarea",
     doneTasks: "Hechas",
     clearDone: "Borrar hechas",
+    showAll: "Ver las {count}",
+    showFewer: "Ver menos",
     clearConfirm_one: "Borrar 1 tarea hecha",
     clearConfirm_other: "Borrar {count} tareas hechas",
   },
 };
-
-export const LANGUAGES = Object.keys(STRINGS);
 
 let current = "en";
 
@@ -393,15 +409,15 @@ export function t(key, vars = {}) {
   return text.replace(/\{(\w+)\}/g, (_, name) => vars[name] ?? "");
 }
 
-export function applyTranslations(root = document) {
-  root.querySelectorAll("[data-i18n]").forEach((node) => {
+export function applyTranslations() {
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
     node.textContent = t(node.dataset.i18n);
   });
   // Only for hints written in this file, never for user input.
-  root.querySelectorAll("[data-i18n-html]").forEach((node) => {
+  document.querySelectorAll("[data-i18n-html]").forEach((node) => {
     node.innerHTML = t(node.dataset.i18nHtml);
   });
-  root.querySelectorAll("[data-i18n-label]").forEach((node) => {
+  document.querySelectorAll("[data-i18n-label]").forEach((node) => {
     node.setAttribute("aria-label", t(node.dataset.i18nLabel));
   });
   document.title = t("title");

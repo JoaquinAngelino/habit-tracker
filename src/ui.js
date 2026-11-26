@@ -5,7 +5,6 @@ const ICONS = {
   minus: "M3 8h10",
   left: "M10 3L5 8l5 5",
   right: "M6 3l5 5-5 5",
-  check: "M3 8.5l3.5 3.5L13 4.5",
 };
 
 export const $ = (sel) => document.querySelector(sel);

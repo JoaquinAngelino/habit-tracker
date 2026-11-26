@@ -8,21 +8,21 @@ import { API } from "../src/server.js";
 
 test("sealed data opens with the same passphrase and fails with another", async () => {
   const salt = newSalt();
-  const bytes = await seal({ a: 1 }, await deriveKey("right horse", salt, 1000), salt, 1000);
+  const bytes = await seal({ a: 1 }, await deriveKey("right horse", salt, 100_000), salt, 100_000);
   assert.ok(bytes instanceof Uint8Array);
   const envelope = readEnvelope(bytes);
-  assert.deepEqual([envelope.v, envelope.iterations], [3, 1000]);
+  assert.deepEqual([envelope.v, envelope.iterations], [3, 100_000]);
   assert.deepEqual(envelope.salt, salt);
-  assert.deepEqual(await unseal(envelope, await deriveKey("right horse", salt, 1000)), { a: 1 });
-  await assert.rejects(unseal(envelope, await deriveKey("wrong horse", salt, 1000)), { name: "OperationError" });
+  assert.deepEqual(await unseal(envelope, await deriveKey("right horse", salt, 100_000)), { a: 1 });
+  await assert.rejects(unseal(envelope, await deriveKey("wrong horse", salt, 100_000)), { name: "OperationError" });
   assert.throws(() => readEnvelope(new Uint8Array([9, 9, 9])), { code: "errFormat" });
 });
 
 test("files are compressed raw bytes, and the older JSON text formats still open", async () => {
   const salt = newSalt();
-  const key = await deriveKey("right horse", salt, 1000);
+  const key = await deriveKey("right horse", salt, 100_000);
   const value = { log: Object.fromEntries(Array.from({ length: 365 }, (_, i) => [`2026-${i}`, { abcdefgh: 1 }])) };
-  const bytes = await seal(value, key, salt, 1000);
+  const bytes = await seal(value, key, salt, 100_000);
   assert.ok(bytes.length < JSON.stringify(value).length / 7);
   assert.deepEqual(await unseal(readEnvelope(bytes), key), value);
 
@@ -30,7 +30,7 @@ test("files are compressed raw bytes, and the older JSON text formats still open
   const legacy = async (v, plain) => {
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain);
-    return new TextEncoder().encode(JSON.stringify({ v, kdf: "PBKDF2-SHA256", iterations: 1000, salt: b64(salt), iv: b64(iv), data: b64(data) }));
+    return new TextEncoder().encode(JSON.stringify({ v, kdf: "PBKDF2-SHA256", iterations: 100_000, salt: b64(salt), iv: b64(iv), data: b64(data) }));
   };
   assert.deepEqual(await unseal(readEnvelope(await legacy(1, new TextEncoder().encode('{"a":1}'))), key), { a: 1 });
   assert.deepEqual(await unseal(readEnvelope(await legacy(2, await packJson({ a: 2 }))), key), { a: 2 });
@@ -76,9 +76,9 @@ function fakeGitHub({ lag = 0 } = {}) {
 function device(passphrase = "correct horse battery staple") {
   const statuses = [];
   const store = createStore({
-    config: () => ({ mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", path: "data/habits.enc", token: "t", passphrase }),
+    config: () => ({ mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", token: "t", passphrase }),
     onChange: () => {},
-    onStatus: (state, message) => statuses.push(message ? `${state}: ${message}` : state),
+    onStatus: (state, err) => statuses.push(err ? `${state}: ${err.code || err.name}` : state),
   });
   return { store, statuses };
 }
@@ -124,7 +124,7 @@ test("a wrong passphrase reports an error and never overwrites the file", async 
   const intruder = device("guess");
   intruder.store.commit({ t: "habit", habit: { ...habit, id: "x" } });
   await intruder.store.sync();
-  assert.match(intruder.statuses.at(-1), /^error: Wrong passphrase/);
+  assert.equal(intruder.statuses.at(-1), "error: OperationError");
   assert.equal(repo.files.get("data:data/habits.enc"), before);
 });
 
@@ -164,12 +164,17 @@ async function fakeServer() {
 
 function accountDevice(session, { passphrase = "correct horse battery staple", sub = "g1" } = {}) {
   const statuses = [];
+  let renders = 0;
+  let passes = 0;
   const store = createStore({
-    config: () => ({ mode: "account", target: `account:${sub}`, ready: true, session, passphrase }),
-    onChange: () => {},
-    onStatus: (state, message, code) => statuses.push(code ?? (message ? `${state}: ${message}` : state)),
+    config: () => {
+      passes++;
+      return { mode: "account", target: `account:${sub}`, ready: true, session, passphrase };
+    },
+    onChange: () => renders++,
+    onStatus: (state, err) => statuses.push(err?.code || (err ? `${state}: ${err.name}` : state)),
   });
-  return { store, statuses };
+  return { store, statuses, renders: () => renders, passes: () => passes };
 }
 
 test("two devices sync through the account server and merge each other's edits", async () => {
@@ -183,7 +188,7 @@ test("two devices sync through the account server and merge each other's edits",
   await a.store.sync();
   assert.equal(a.statuses.at(-1), "synced");
   const stored = server.env.DB.sql.prepare("SELECT version, envelope FROM vaults").get();
-  assert.equal(stored.version, 1);
+  assert.match(stored.version, /^[0-9a-f]{16}$/);
   const sealed = new TextDecoder().decode(stored.envelope);
   assert.ok(stored.envelope instanceof Uint8Array && !sealed.includes("Read") && !sealed.includes("milk"));
 
@@ -218,7 +223,7 @@ test("an expired session reports signed out and keeps the edits for later", asyn
 
 test("switching from GitHub to a new account uploads what the device already has", async () => {
   fakeGitHub();
-  let cfg = { mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", path: "data/habits.enc", token: "t", passphrase: "pass words here" };
+  let cfg = { mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", token: "t", passphrase: "pass words here" };
   const store = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
   store.commit({ t: "habit", habit });
   await store.sync();
@@ -227,34 +232,150 @@ test("switching from GitHub to a new account uploads what the device already has
   const server = await fakeServer();
   cfg = { mode: "account", target: "account:g1", ready: true, session: await server.sessionFor("g1"), passphrase: "pass words here" };
   await store.sync();
-  assert.equal(server.env.DB.sql.prepare("SELECT version FROM vaults").get().version, 1);
+  assert.ok(server.env.DB.sql.prepare("SELECT version FROM vaults").get());
   const other = accountDevice(await server.sessionFor("g1"), { passphrase: "pass words here" });
   await other.store.sync();
   assert.deepEqual(other.store.data().habits, [habit]);
 });
 
+// Holds the first request whose method matches until `release` is called.
+function gate(method) {
+  const real = globalThis.fetch;
+  let release;
+  const released = new Promise((resolve) => (release = resolve));
+  let reached;
+  const arrived = new Promise((resolve) => (reached = resolve));
+  let used = false;
+  globalThis.fetch = async (url, init = {}) => {
+    if (!used && (init.method ?? "GET") === method) {
+      used = true;
+      reached();
+      await released;
+    }
+    return real(url, init);
+  };
+  return { arrived, release, restore: () => (globalThis.fetch = real) };
+}
+
 test("signing out empties the device, and a sync already under way cannot bring the data back", async () => {
   const server = await fakeServer();
   const a = accountDevice(await server.sessionFor("g1"));
   a.store.commit({ t: "habit", habit });
+  const held = gate("PUT");
   const inFlight = a.store.sync();
+  await held.arrived;
   a.store.reset();
+  held.release();
   await inFlight;
+  held.restore();
   assert.deepEqual(a.store.data().habits, []);
   assert.equal(a.store.hasPending(), false);
 });
 
-test("sync resolves only after edits made during a running sync are pushed too", async () => {
+test("an edit made while a save is on its way is pushed by the same sync call", async () => {
   const server = await fakeServer();
   const a = accountDevice(await server.sessionFor("g1"));
   a.store.commit({ t: "habit", habit });
-  a.store.sync();
+  const held = gate("PUT");
+  const first = a.store.sync();
+  await held.arrived;
   a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
-  await a.store.sync();
+  const second = a.store.sync();
+  held.release();
+  await second;
+  await first;
+  held.restore();
   assert.equal(a.store.hasPending(), false);
   const b = accountDevice(await server.sessionFor("g1"));
   await b.store.sync();
   assert.deepEqual(Object.keys(b.store.data().log), ["2026-11-24"]);
+});
+
+test("turning sync off and back on does not bring back what another device deleted", async () => {
+  const server = await fakeServer();
+  const account = { mode: "account", target: "account:g1", ready: true, session: await server.sessionFor("g1"), passphrase: "pass words here" };
+  let cfg = account;
+  const a = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
+  a.commit({ t: "habit", habit });
+  a.commit({ t: "log", date: "2026-11-23", id: "h", v: 1 });
+  await a.sync();
+
+  const b = accountDevice(await server.sessionFor("g1"), { passphrase: "pass words here" });
+  await b.store.sync();
+  b.store.commit({ t: "delHabit", id: "h" });
+  await b.store.sync();
+
+  cfg = { mode: "none" };
+  await a.sync();
+  cfg = account;
+  await a.sync();
+  assert.deepEqual(a.data().habits, []);
+  assert.deepEqual(a.data().log, {});
+});
+
+test("data that came from one account never reaches another, even after a stop at no sync or a repository", async () => {
+  const server = await fakeServer();
+  const repo = { mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", token: "t", passphrase: "pass words here" };
+  const g1 = { mode: "account", target: "account:g1", ready: true, session: await server.sessionFor("g1"), passphrase: "pass words here" };
+  const g2 = { mode: "account", target: "account:g2", ready: true, session: await server.sessionFor("g2"), passphrase: "pass words here" };
+  for (const detour of [{ mode: "none" }, repo]) {
+    server.env.DB.sql.exec("DELETE FROM vaults");
+    let cfg = g1;
+    const store = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
+    store.commit({ t: "habit", habit });
+    await store.sync();
+    cfg = detour;
+    if (detour === repo) {
+      const toServer = globalThis.fetch;
+      fakeGitHub();
+      await store.sync();
+      globalThis.fetch = toServer;
+    } else await store.sync();
+    cfg = g2;
+    await store.sync();
+    assert.deepEqual(store.data().habits, [], detour.mode);
+    assert.equal(server.env.DB.sql.prepare("SELECT COUNT(*) AS n FROM vaults").get().n, 1, detour.mode);
+  }
+});
+
+test("a GitHub save refused because the file changed is retried on top of the new file", async () => {
+  const repo = fakeGitHub();
+  const a = device();
+  const b = device();
+  a.store.commit({ t: "habit", habit });
+  await a.store.sync();
+  await b.store.sync();
+
+  // B saves between A's read and A's write.
+  const real = globalThis.fetch;
+  let raced = false;
+  globalThis.fetch = async (url, init = {}) => {
+    if (!raced && init.method === "PUT") {
+      raced = true;
+      b.store.commit({ t: "log", date: "2026-11-23", id: "h", v: 1 });
+      await b.store.sync();
+    }
+    return real(url, init);
+  };
+  a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
+  await a.store.sync();
+  globalThis.fetch = real;
+  assert.equal(a.statuses.at(-1), "synced");
+  assert.deepEqual(Object.keys(a.store.data().log).sort(), ["2026-11-23", "2026-11-24"]);
+  assert.equal(repo.writes, 3);
+});
+
+test("edits save on their own 30 seconds after the last one", async (t) => {
+  const server = await fakeServer();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const a = accountDevice(await server.sessionFor("g1"));
+  a.store.commit({ t: "habit", habit });
+  t.mock.timers.tick(29_000);
+  assert.equal(a.passes(), 0);
+  t.mock.timers.tick(1_000);
+  await a.store.sync();
+  assert.equal(a.store.hasPending(), false);
+  assert.equal(server.env.DB.sql.prepare("SELECT COUNT(*) AS n FROM vaults").get().n, 1);
 });
 
 test("another Google account signing in on the same device starts empty instead of receiving the data", async () => {
@@ -292,8 +413,10 @@ test("saving edits takes one request, and checking for news downloads nothing wh
   a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
   await a.store.sync();
   assert.deepEqual(seen.splice(0), ["PUT 204 -"]);
+  const rendersBefore = a.renders();
   await a.store.sync();
   assert.deepEqual(seen.splice(0), ["GET 204 -"]);
+  assert.equal(a.renders(), rendersBefore);
 
   // B's copy is behind: its write is refused with A's data, merged, and written again.
   b.store.commit({ t: "log", date: "2026-11-25", id: "h", v: 1 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addDays, weekStart, daysBetween, emptyData, streak, rate, level, goalProgress, applyOp, replay, queue, isDone, normalize, sortTasks, periodCount } from "../src/lib.js";
+import { addDays, weekStart, daysBetween, emptyData, streak, rate, level, goalProgress, applyOp, replay, queue, isDone, normalize, sortTasks, periodCount, merge, hasData } from "../src/lib.js";
 
 const TODAY = "2026-11-24"; // a Tuesday
 
@@ -157,4 +157,38 @@ test("applying each edit to the current view matches replaying the queued edits 
     assert.deepEqual(view, replay(base, pending));
   }
   assert.deepEqual(base.log, { "2026-11-20": { a: 1 } });
+});
+
+test("a slip logged today ends an avoid habit's streak and counts against its rate", () => {
+  const sugar = { ...daily, type: "avoid", start: "2026-11-01" };
+  const data = dataWith(sugar, { [TODAY]: 1 });
+  assert.equal(streak(data, sugar, TODAY).current, 0);
+  assert.equal(rate(data, sugar, TODAY, 7), 6 / 7);
+});
+
+test("data from a newer version keeps its unknown fields and habit types", () => {
+  const data = normalize({ habits: [daily, { id: "z", type: "someday" }], log: {}, notes: ["kept"] });
+  assert.deepEqual(data.habits.map((h) => h.id), ["h", "z"]);
+  assert.deepEqual(data.notes, ["kept"]);
+  assert.deepEqual(normalize(null), emptyData());
+});
+
+test("merging adds the device's items and log entries, replacing those with the same id", () => {
+  const remote = dataWith(daily, { "2026-11-20": 1 });
+  remote.tasks.push({ id: "t1", title: "remote" }, { id: "t2", title: "kept" });
+  const device = dataWith({ ...daily, name: "Read more" }, { "2026-11-21": 2 });
+  device.tasks.push({ id: "t1", title: "device" });
+  const out = merge(remote, device);
+  assert.deepEqual(out.habits.map((h) => h.name), ["Read more"]);
+  assert.deepEqual(out.tasks.map((x) => x.title), ["device", "kept"]);
+  assert.deepEqual(out.log, { "2026-11-20": { h: 1 }, "2026-11-21": { h: 2 } });
+  assert.equal(remote.tasks[0].title, "remote");
+  assert.equal(hasData(emptyData()), false);
+});
+
+test("clearing done tasks is one edit", () => {
+  const data = emptyData();
+  data.tasks.push({ id: "a" }, { id: "b" }, { id: "c" });
+  applyOp(data, { t: "delTasks", ids: ["a", "c"] });
+  assert.deepEqual(data.tasks, [{ id: "b" }]);
 });
