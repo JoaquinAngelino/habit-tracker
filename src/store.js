@@ -1,7 +1,6 @@
 import { emptyData, normalize, replay, queue, applyOp, merge, hasData } from "./lib.js";
 import { deriveKey, seal, unseal, readEnvelope, newSalt, packJson, unpackJson, toB64, fromB64, ITERATIONS } from "./crypto.js";
 import * as idb from "./idb.js";
-import * as github from "./github.js";
 import * as account from "./server.js";
 import { local, read, write } from "./storage.js";
 
@@ -12,7 +11,7 @@ const LOCAL_COPY_KEY = "ht.cache.v1";
 const PENDING_KEY = "ht.pending.v1";
 // Touched on every save to IndexedDB, which other tabs cannot observe, so they know to reload.
 const CHANGED_KEY = "ht.changed";
-// Batch edits: each save is a GitHub commit or a server request.
+// Batch edits: each save is a server request.
 const SAVE_DELAY = 30_000;
 // Phones hide and show the app often; checking on every return would burn server requests.
 const REFRESH_AFTER = 120_000;
@@ -21,11 +20,11 @@ const MAX_DETACHED_EDITS = 2_000;
 const MIN_PASSPHRASE = 8;
 // Copies saved before targets were recorded came from somewhere unknown, so they are never merged into a target.
 const UNKNOWN_TARGET = "unknown";
-const BACKENDS = { github, account };
+const BACKENDS = { account };
 
 // `target` is where `base`, `version` and `bytes` came from; null means data that never synced.
 // `owner` is the account the data belongs to; it survives switching to a repository or to no sync.
-const emptyCopy = () => ({ target: null, owner: null, merging: false, version: null, bytes: null, replaced: [], base: emptyData() });
+const emptyCopy = () => ({ target: null, owner: null, merging: false, version: null, bytes: null, base: emptyData() });
 
 function parse(text) {
   try {
@@ -55,7 +54,6 @@ function fromSaved(saved, bytes, base) {
     merging: Boolean(saved.merging),
     version,
     bytes,
-    replaced: Array.isArray(saved.replaced) ? saved.replaced : [],
     base: normalize(base),
   };
 }
@@ -71,7 +69,6 @@ async function loadCopy() {
   return null;
 }
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The local copy is the last synced file plus the edits not yet pushed. Every sync replays those edits on
 // top of the newest file, so changes made on another device are kept.
@@ -194,7 +191,7 @@ export function createStore({ config, onChange, onStatus }) {
     const detach = cache.target === null || (cfg.mode === "none" && cache.pending.length > MAX_DETACHED_EDITS);
     if (detach && cache.pending.length && !stale) {
       const folded = new Set(cache.pending);
-      const copy = { ...cache, target: null, version: null, bytes: null, replaced: [], merging: false, base: replay(cache.base, cache.pending) };
+      const copy = { ...cache, target: null, version: null, bytes: null, merging: false, base: replay(cache.base, cache.pending) };
       if ((await saveCopy(copy)) && start === resets) {
         cache = { ...copy, pending: cache.pending.filter((op) => !folded.has(op)) };
         savePending();
@@ -219,7 +216,6 @@ export function createStore({ config, onChange, onStatus }) {
       merging: cache.target === null && hasData(cache.base),
       version: null,
       bytes: null,
-      replaced: [],
     });
     saveCopy();
   }
@@ -238,7 +234,6 @@ export function createStore({ config, onChange, onStatus }) {
       if (held && remote === held && !cache.pending.length && !cache.merging) return synced();
       for (let attempt = 0; ; attempt++) {
         if (start !== resets) return;
-        if (backend.staleReads && held && (!remote || cache.replaced.includes(remote.version))) remote = held;
         const envelope = remote && readEnvelope(remote.bytes);
         const salt = envelope?.salt ?? newSalt();
         const iterations = envelope?.iterations ?? ITERATIONS;
@@ -249,33 +244,25 @@ export function createStore({ config, onChange, onStatus }) {
         const next = replay(base, sent);
         let version = remote?.version ?? null;
         let bytes = remote?.bytes ?? null;
-        const replaced = [...cache.replaced];
         if (sent.length || (cache.merging && remoteData) || (!remote && hasData(next))) {
           // The first save fixes the passphrase for good, so a weak one is refused before it happens.
           if (!remote && cfg.passphrase.length < MIN_PASSPHRASE) throw Object.assign(new Error("Passphrase too short"), { code: "errWeakPassphrase" });
-          if (!remote) await backend.ensureBranch?.(cfg);
           bytes = await seal(next, key, salt, iterations);
           if (start !== resets) return;
           try {
-            const written = await backend.writeFile(cfg, bytes, version);
-            if (version) replaced.push(version);
-            version = written;
+            version = await backend.writeFile(cfg, bytes, version);
           } catch (err) {
             if (!err.conflict || attempt >= 4) throw err;
-            if ("current" in err) remote = err.current;
-            else {
-              await wait(1000 * 2 ** attempt);
-              remote = await backend.readFile(cfg, held);
-            }
+            // The refusal carries the newer file.
+            remote = err.current;
             continue;
           }
         }
         // Results are dropped after a sign-out, or when another tab saved meanwhile; the server has them.
         if (start !== resets || stale) return;
-        if (cache.version && version !== cache.version && !replaced.includes(cache.version)) replaced.push(cache.version);
         const pushed = new Set(sent);
         const unsent = () => cache.pending.filter((op) => !pushed.has(op));
-        Object.assign(cache, { base: next, version, bytes, replaced: replaced.slice(-20), merging: false });
+        Object.assign(cache, { base: next, version, bytes, merging: false });
         setView(replay(next, unsent()));
         // Pushed edits leave the list only once the copy holding them is saved.
         if ((await saveCopy()) && start === resets) {

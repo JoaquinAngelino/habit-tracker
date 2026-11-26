@@ -36,116 +36,7 @@ test("files are compressed raw bytes, and the older JSON text formats still open
   assert.deepEqual(await unseal(readEnvelope(await legacy(2, await packJson({ a: 2 }))), key), { a: 2 });
 });
 
-// An in-memory stand-in for the parts of the GitHub REST API the store uses.
-// With `lag`, reads keep returning the version a write replaced for that many milliseconds.
-function fakeGitHub({ lag = 0 } = {}) {
-  const repo = { files: new Map(), old: new Map(), branches: new Set(["main"]), writes: 0 };
-  globalThis.fetch = async (url, { method = "GET", body } = {}) => {
-    const { pathname, searchParams } = new URL(url);
-    const reply = (status, json) => ({ ok: status < 300, status, statusText: "", json: async () => json });
-    const file = pathname.match(/^\/repos\/me\/habits\/contents\/(.+)$/);
-    if (file && method === "GET") {
-      const key = `${searchParams.get("ref")}:${decodeURIComponent(file[1])}`;
-      const f = repo.old.has(key) && Date.now() - repo.old.get(key).at < lag ? repo.old.get(key).file : repo.files.get(key);
-      return f ? reply(200, { sha: f.sha, content: btoa(f.text) }) : reply(404, { message: "Not Found" });
-    }
-    if (file && method === "PUT") {
-      const b = JSON.parse(body);
-      if (!repo.branches.has(b.branch)) return reply(404, { message: "Branch not found" });
-      const key = `${b.branch}:${decodeURIComponent(file[1])}`;
-      const current = repo.files.get(key);
-      if (current?.sha !== b.sha) return reply(409, { message: "sha mismatch" });
-      const sha = `sha${++repo.writes}`;
-      repo.old.set(key, { file: current ?? null, at: Date.now() });
-      repo.files.set(key, { sha, text: atob(b.content) });
-      return reply(200, { content: { sha } });
-    }
-    const branch = pathname.match(/^\/repos\/me\/habits\/branches\/(.+)$/);
-    if (branch) return repo.branches.has(branch[1]) ? reply(200, {}) : reply(404, {});
-    if (pathname === "/repos/me/habits") return reply(200, { default_branch: "main" });
-    if (pathname === "/repos/me/habits/git/ref/heads/main") return reply(200, { object: { sha: "c0" } });
-    if (pathname === "/repos/me/habits/git/refs" && method === "POST") {
-      repo.branches.add(JSON.parse(body).ref.replace("refs/heads/", ""));
-      return reply(201, {});
-    }
-    return reply(404, { message: `unexpected ${method} ${pathname}` });
-  };
-  return repo;
-}
-
-function device(passphrase = "correct horse battery staple") {
-  const statuses = [];
-  const store = createStore({
-    config: () => ({ mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", token: "t", passphrase }),
-    onChange: () => {},
-    onStatus: (state, err) => statuses.push(err ? `${state}: ${err.code || err.name}` : state),
-  });
-  return { store, statuses };
-}
-
 const habit = { id: "h", name: "Read", type: "check", target: 1, unit: "", start: "2026-11-01", archived: false };
-
-test("two devices sync through the encrypted file and keep each other's edits", async () => {
-  const repo = fakeGitHub();
-  const a = device();
-  const b = device();
-
-  a.store.commit({ t: "habit", habit });
-  a.store.commit({ t: "log", date: "2026-11-23", id: "h", v: 1 });
-  await a.store.sync();
-  assert.equal(a.statuses.at(-1), "synced");
-  assert.ok(repo.branches.has("data"));
-  const stored = repo.files.get("data:data/habits.enc").text;
-  assert.ok(!stored.includes("Read"));
-
-  await b.store.sync();
-  assert.deepEqual(b.store.data().habits, [habit]);
-
-  // Both edit before either syncs: the second sync replays its edit on top of the first.
-  a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
-  b.store.commit({ t: "habit", habit: { ...habit, name: "Read fiction" } });
-  await a.store.sync();
-  await b.store.sync();
-  await a.store.sync();
-  for (const d of [a, b]) {
-    assert.equal(d.store.data().habits[0].name, "Read fiction");
-    assert.deepEqual(Object.keys(d.store.data().log), ["2026-11-23", "2026-11-24"]);
-    assert.equal(d.store.hasPending(), false);
-  }
-});
-
-test("a wrong passphrase reports an error and never overwrites the file", async () => {
-  const repo = fakeGitHub();
-  const a = device();
-  a.store.commit({ t: "habit", habit });
-  await a.store.sync();
-  const before = repo.files.get("data:data/habits.enc");
-
-  const intruder = device("guess");
-  intruder.store.commit({ t: "habit", habit: { ...habit, id: "x" } });
-  await intruder.store.sync();
-  assert.equal(intruder.statuses.at(-1), "error: OperationError");
-  assert.equal(repo.files.get("data:data/habits.enc"), before);
-});
-
-test("edits survive GitHub serving the previous version right after a save", async () => {
-  const repo = fakeGitHub({ lag: 5000 });
-  const a = device();
-  a.store.commit({ t: "habit", habit });
-  await a.store.sync();
-  for (const date of ["2026-11-22", "2026-11-23", "2026-11-24"]) {
-    a.store.commit({ t: "log", date, id: "h", v: 1 });
-    await a.store.sync();
-    assert.ok(a.store.data().log[date], `${date} kept after its own save`);
-  }
-  assert.deepEqual(Object.keys(a.store.data().log), ["2026-11-22", "2026-11-23", "2026-11-24"]);
-  assert.equal(a.statuses.at(-1), "synced");
-
-  repo.old.clear();
-  const b = device();
-  await b.store.sync();
-  assert.deepEqual(Object.keys(b.store.data().log), ["2026-11-22", "2026-11-23", "2026-11-24"]);
-});
 
 // The real worker over an in-memory database, with sessions made directly instead of through Google.
 async function fakeServer() {
@@ -219,23 +110,6 @@ test("an expired session reports signed out and keeps the edits for later", asyn
   await a.store.sync();
   assert.equal(a.statuses.at(-1), "errSignedOut");
   assert.equal(a.store.hasPending(), true);
-});
-
-test("switching from GitHub to a new account uploads what the device already has", async () => {
-  fakeGitHub();
-  let cfg = { mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", token: "t", passphrase: "pass words here" };
-  const store = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
-  store.commit({ t: "habit", habit });
-  await store.sync();
-  assert.equal(store.hasPending(), false);
-
-  const server = await fakeServer();
-  cfg = { mode: "account", target: "account:g1", ready: true, session: await server.sessionFor("g1"), passphrase: "pass words here" };
-  await store.sync();
-  assert.ok(server.env.DB.sql.prepare("SELECT version FROM vaults").get());
-  const other = accountDevice(await server.sessionFor("g1"), { passphrase: "pass words here" });
-  await other.store.sync();
-  assert.deepEqual(other.store.data().habits, [habit]);
 });
 
 // Holds the first request whose method matches until `release` is called.
@@ -313,56 +187,53 @@ test("turning sync off and back on does not bring back what another device delet
   assert.deepEqual(a.data().log, {});
 });
 
-test("data that came from one account never reaches another, even after a stop at no sync or a repository", async () => {
+test("data that came from one account never reaches another, even after a stop at no sync", async () => {
   const server = await fakeServer();
-  const repo = { mode: "github", target: "github:me/habits@data", ready: true, repo: "me/habits", branch: "data", token: "t", passphrase: "pass words here" };
   const g1 = { mode: "account", target: "account:g1", ready: true, session: await server.sessionFor("g1"), passphrase: "pass words here" };
   const g2 = { mode: "account", target: "account:g2", ready: true, session: await server.sessionFor("g2"), passphrase: "pass words here" };
-  for (const detour of [{ mode: "none" }, repo]) {
-    server.env.DB.sql.exec("DELETE FROM vaults");
-    let cfg = g1;
-    const store = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
-    store.commit({ t: "habit", habit });
-    await store.sync();
-    cfg = detour;
-    if (detour === repo) {
-      const toServer = globalThis.fetch;
-      fakeGitHub();
-      await store.sync();
-      globalThis.fetch = toServer;
-    } else await store.sync();
-    cfg = g2;
-    await store.sync();
-    assert.deepEqual(store.data().habits, [], detour.mode);
-    assert.equal(server.env.DB.sql.prepare("SELECT COUNT(*) AS n FROM vaults").get().n, 1, detour.mode);
-  }
+  let cfg = g1;
+  const store = createStore({ config: () => cfg, onChange: () => {}, onStatus: () => {} });
+  store.commit({ t: "habit", habit });
+  await store.sync();
+  cfg = { mode: "none" };
+  await store.sync();
+  cfg = g2;
+  await store.sync();
+  assert.deepEqual(store.data().habits, []);
+  assert.equal(server.env.DB.sql.prepare("SELECT COUNT(*) AS n FROM vaults").get().n, 1);
 });
 
-test("a GitHub save refused because the file changed is retried on top of the new file", async () => {
-  const repo = fakeGitHub();
-  const a = device();
-  const b = device();
+test("a wrong passphrase reports an error and never overwrites the data", async () => {
+  const server = await fakeServer();
+  const a = accountDevice(await server.sessionFor("g1"));
+  a.store.commit({ t: "habit", habit });
+  await a.store.sync();
+  const before = server.env.DB.sql.prepare("SELECT version FROM vaults").get().version;
+
+  const intruder = accountDevice(await server.sessionFor("g1"), { passphrase: "a wrong guess" });
+  intruder.store.commit({ t: "habit", habit: { ...habit, id: "x" } });
+  await intruder.store.sync();
+  assert.equal(intruder.statuses.at(-1), "error: OperationError");
+  assert.equal(server.env.DB.sql.prepare("SELECT version FROM vaults").get().version, before);
+});
+
+test("a save refused because the data changed is retried on top of the newer data", async () => {
+  const server = await fakeServer();
+  const a = accountDevice(await server.sessionFor("g1"));
+  const b = accountDevice(await server.sessionFor("g1"));
   a.store.commit({ t: "habit", habit });
   await a.store.sync();
   await b.store.sync();
 
-  // B saves between A's read and A's write.
-  const real = globalThis.fetch;
-  let raced = false;
-  globalThis.fetch = async (url, init = {}) => {
-    if (!raced && init.method === "PUT") {
-      raced = true;
-      b.store.commit({ t: "log", date: "2026-11-23", id: "h", v: 1 });
-      await b.store.sync();
-    }
-    return real(url, init);
-  };
+  // B saves between A's last read and A's write.
+  b.store.commit({ t: "log", date: "2026-11-23", id: "h", v: 1 });
+  await b.store.sync();
   a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
   await a.store.sync();
-  globalThis.fetch = real;
   assert.equal(a.statuses.at(-1), "synced");
   assert.deepEqual(Object.keys(a.store.data().log).sort(), ["2026-11-23", "2026-11-24"]);
-  assert.equal(repo.writes, 3);
+  await b.store.sync();
+  assert.deepEqual(Object.keys(b.store.data().log).sort(), ["2026-11-23", "2026-11-24"]);
 });
 
 test("edits save on their own 30 seconds after the last one", async (t) => {

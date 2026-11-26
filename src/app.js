@@ -7,18 +7,16 @@ import { drawCard } from "./share.js";
 import { createStore } from "./store.js";
 import { local, session, read, write } from "./storage.js";
 import { fromB64, wrap, unwrap } from "./crypto.js";
-import { DEFAULT_BRANCH } from "./github.js";
 import { t, setLanguage, getLanguage, applyTranslations } from "./i18n.js";
 import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, publishLink, removeLink, feedUrl, saveRecovery, readRecovery, passkeyCount, removePasskeys } from "./server.js";
 import { buildShare, randomKey, newRecoveryCode, cleanCode, formatCode, utcMinutes, canRemind, syncReminders, createPasskey, usePasskey } from "./extras.js";
 
 const CONFIG_KEY = "ht.config";
-const TOKEN_KEY = "ht.token";
 const PASS_KEY = "ht.passphrase";
 const SESSION_KEY = "ht.session";
 const EMAIL_KEY = "ht.email";
-const SECRET_KEYS = [TOKEN_KEY, PASS_KEY, SESSION_KEY, EMAIL_KEY];
-const MODES = ["account", "github", "none"];
+const SECRET_KEYS = [PASS_KEY, SESSION_KEY, EMAIL_KEY];
+const MODES = ["account", "none"];
 const LANG_KEY = "ht.lang";
 const VIEWS = ["today", "tasks", "progress", "habits"];
 const TIMER_KEY = "ht.timer";
@@ -69,16 +67,16 @@ function loadTimer() {
 }
 
 function loadSettings() {
-  const defaults = { repo: "", branch: DEFAULT_BRANCH, remember: true, sub: "" };
+  const defaults = { remember: true, sub: "" };
   let saved = {};
   try {
     saved = JSON.parse(read(local, CONFIG_KEY) ?? "{}") ?? {};
   } catch {
     /* start from the defaults */
   }
-  // Before sync modes existed, a saved repository meant GitHub sync.
-  const mode = MODES.includes(saved.mode) ? saved.mode : saved.repo ? "github" : "none";
-  return { ...defaults, ...saved, mode };
+  // A device that synced with a GitHub repository, which is no longer offered, keeps its data on the device only.
+  const { repo, branch, ...kept } = saved;
+  return { ...defaults, ...kept, mode: MODES.includes(saved.mode) ? saved.mode : "none" };
 }
 
 const settings = loadSettings();
@@ -89,6 +87,9 @@ function saveSecret(key, value) {
   write(session, key, settings.remember ? null : value || null);
   write(local, key, settings.remember ? value || null : null);
 }
+
+// A GitHub token from when repositories could be synced with has no use left.
+for (const kind of [local, session]) write(kind, "ht.token", null);
 
 // Earlier versions kept the email with the settings, whatever Remember said.
 if (settings.email) {
@@ -102,12 +103,6 @@ function config() {
   if (settings.mode === "account") {
     const token = secret(SESSION_KEY);
     return { mode: "account", target: `account:${settings.sub}`, session: token, passphrase, ready: Boolean(settings.sub && token && passphrase) };
-  }
-  if (settings.mode === "github") {
-    const repo = settings.repo.trim();
-    const branch = settings.branch.trim() || DEFAULT_BRANCH;
-    const token = secret(TOKEN_KEY);
-    return { mode: "github", target: `github:${repo}@${branch}`, repo, branch, token, passphrase, ready: Boolean(repo && token && passphrase) };
   }
   return { mode: "none" };
 }
@@ -1192,7 +1187,7 @@ function render() {
 function describe(err) {
   if (!err) return "";
   if (err.name === "OperationError") return t("errPassphrase");
-  if (err.code) return t(err.code, { repo: settings.repo, message: err.message });
+  if (err.code) return t(err.code, { message: err.message });
   if (err instanceof TypeError) return t("errNetwork");
   return err.message || String(err);
 }
@@ -1507,9 +1502,8 @@ function paintSettings() {
   $("#syncMode").value = mode;
   $("#noneHint").hidden = mode !== "none";
   $("#accountBlock").hidden = mode !== "account";
-  $("#githubBlock").hidden = mode !== "github";
   $("#passphraseBlock").hidden = mode === "none";
-  $("#passphraseHint").innerHTML = t(mode === "github" ? "passphraseHint_github" : "passphraseHint");
+  $("#passphraseHint").innerHTML = t("passphraseHint");
   $("#accountHint").hidden = signedIn;
   $("#googleButton").hidden = signedIn;
   // An account's data stays on the device after its session ends, so Sign out stays reachable.
@@ -1539,14 +1533,8 @@ function initSettings() {
   };
   toggle.addEventListener("click", () => setOpen(panel.hidden));
 
-  const repo = $("#repo");
-  const branch = $("#branch");
-  const token = $("#token");
   const passphrase = $("#passphrase");
   const remember = $("#remember");
-  repo.value = settings.repo;
-  branch.value = settings.branch;
-  token.value = secret(TOKEN_KEY);
   passphrase.value = secret(PASS_KEY);
   remember.checked = settings.remember;
 
@@ -1557,15 +1545,6 @@ function initSettings() {
     paintSettings();
     store.sync();
   });
-  repo.addEventListener("input", () => {
-    settings.repo = repo.value.trim();
-    saveSettings();
-  });
-  branch.addEventListener("input", () => {
-    settings.branch = branch.value.trim();
-    saveSettings();
-  });
-  token.addEventListener("input", () => saveSecret(TOKEN_KEY, token.value.trim()));
   // Saved once typing ends: a save in the middle could seal new data with half a passphrase.
   passphrase.addEventListener("change", () => saveSecret(PASS_KEY, passphrase.value));
   remember.addEventListener("change", () => {
@@ -1573,12 +1552,10 @@ function initSettings() {
     saveSettings();
     for (const key of SECRET_KEYS) saveSecret(key, secret(key));
   });
-  for (const input of [repo, branch, token, passphrase]) input.addEventListener("change", () => store.sync());
+  passphrase.addEventListener("change", () => store.sync());
   $("#syncNow").addEventListener("click", () => store.sync());
   $("#forget").addEventListener("click", () => {
-    token.value = "";
     passphrase.value = "";
-    saveSecret(TOKEN_KEY, "");
     saveSecret(PASS_KEY, "");
     store.sync();
   });

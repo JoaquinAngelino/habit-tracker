@@ -18,7 +18,7 @@
     <p>Habit Tracker is a free habit and task tracker. It is built so that the people who run it cannot read your habits.</p>
 
     <h2>On your device</h2>
-    <p>Your habits, tasks and settings are saved in your browser's storage, compressed but not encrypted, so the app works offline. If you turn on <strong>Remember</strong>, your sign-in, account email, token and passphrase are kept there too; otherwise they last until the tab closes. The site shares its address, joaquinangelino.github.io, with the maintainer's other GitHub Pages sites, which can read this storage as well. <strong>Sign out</strong>, or clearing the site's data in your browser, removes all of it.</p>
+    <p>Your habits, tasks and settings are saved in your browser's storage, compressed but not encrypted, so the app works offline. If you turn on <strong>Remember</strong>, your sign-in, account email and passphrase are kept there too; otherwise they last until the tab closes. The site shares its address, joaquinangelino.github.io, with the maintainer's other GitHub Pages sites, which can read this storage as well. <strong>Sign out</strong>, or clearing the site's data in your browser, removes all of it.</p>
 
     <h2>Signing in with Google</h2>
     <p>Google's sign-in button is loaded from Google only when you open the sign-in in Settings. When you sign in, the app receives a token from Google with your account's unique ID, name and email. The server checks the token and keeps only the unique ID, to recognize your account the next time; it does not store your name or email. The app shows the email in Settings, kept on your device as described above. The app asks Google for nothing beyond signing in: it has no access to your Gmail, Drive, contacts or any other Google data.</p>
@@ -35,9 +35,6 @@
       <li>If you publish a calendar link: the names and times of your habits and dated tasks, <strong>not encrypted</strong>. The server, and anyone who has the link, can read them. Turning the link off deletes them.</li>
       <li>If you turn on reminders: your browser's push address and the times of day to send to. Reminders carry no text, and your browser's push service (Google, Mozilla, Apple or Microsoft) delivers them.</li>
     </ul>
-
-    <h2>Syncing through GitHub instead</h2>
-    <p>If you sync through a GitHub repository, your encrypted data goes straight from your browser to that repository with your own token, under GitHub's terms. It never passes through the Habit Tracker server.</p>
 
     <h2>Who else is involved</h2>
     <p>The site is hosted on GitHub Pages and the server runs on Cloudflare; if you sign in with Google, Google handles that sign-in. Like any web service, they process requests, including your IP address, under their own privacy policies. Habit Tracker has no ads, analytics, tracking cookies or third-party trackers, and never sells or shares your data.</p>
@@ -57,7 +54,7 @@
       <p>Habit Tracker es un registro de hábitos y tareas gratuito. Está hecho para que quienes lo administran no puedan leer tus hábitos.</p>
 
       <h2>En tu dispositivo</h2>
-      <p>Tus hábitos, tareas y ajustes se guardan en el almacenamiento del navegador, comprimidos pero sin cifrar, así la app funciona sin conexión. Si activás <strong>Recordar</strong>, también se guardan ahí tu sesión, el email de tu cuenta, el token y la frase; si no, duran hasta que cerrás la pestaña. El sitio comparte su dirección, joaquinangelino.github.io, con los otros sitios de GitHub Pages de quien lo mantiene, que también pueden leer este almacenamiento. <strong>Cerrar sesión</strong>, o borrar los datos del sitio en el navegador, elimina todo.</p>
+      <p>Tus hábitos, tareas y ajustes se guardan en el almacenamiento del navegador, comprimidos pero sin cifrar, así la app funciona sin conexión. Si activás <strong>Recordar</strong>, también se guardan ahí tu sesión, el email de tu cuenta y la frase; si no, duran hasta que cerrás la pestaña. El sitio comparte su dirección, joaquinangelino.github.io, con los otros sitios de GitHub Pages de quien lo mantiene, que también pueden leer este almacenamiento. <strong>Cerrar sesión</strong>, o borrar los datos del sitio en el navegador, elimina todo.</p>
 
       <h2>Iniciar sesión con Google</h2>
       <p>El botón de inicio de sesión de Google se carga desde Google solo cuando abrís el inicio de sesión en Ajustes. Al iniciar sesión, la app recibe un token de Google con el identificador único de tu cuenta, tu nombre y tu email. El servidor verifica el token y guarda solo el identificador único, para reconocer tu cuenta la próxima vez; no guarda tu nombre ni tu email. La app muestra el email en Ajustes, guardado en tu dispositivo como se explica arriba. La app no le pide a Google nada más que iniciar sesión: no tiene acceso a tu Gmail, Drive, contactos ni ningún otro dato de Google.</p>
@@ -69,14 +66,11 @@
         <li>Tus hábitos y tareas, cifrados en tu navegador con tu frase antes de enviarse. El servidor nunca recibe la frase y no puede descifrarlos.</li>
         <li>Cuándo se guardaron tus datos por última vez, y un número de versión para combinar cambios de varios dispositivos.</li>
         <li>Una copia codificada (hash) de cada sesión, que vence unos 180 días después de su último uso y se borra después.</li>
-        <li>Si creas una clave de recuperación: tu frase, cifrada en tu navegador con esa clave. El servidor nunca recibe la clave.</li>
-        <li>Si compartes el progreso con un enlace: las rachas y los días recientes de los hábitos que elegiste, cifrados en tu navegador con una clave que solo tiene el enlace.</li>
-        <li>Si publicas un enlace de calendario: los nombres y horarios de tus hábitos y tareas con fecha, <strong>sin cifrar</strong>. El servidor, y cualquiera que tenga el enlace, puede leerlos. Al desactivar el enlace se borran.</li>
-        <li>Si activas los recordatorios: la dirección de notificaciones de tu navegador y las horas del día a las que enviar. Los recordatorios no llevan texto, y los entrega el servicio de notificaciones de tu navegador (Google, Mozilla, Apple o Microsoft).</li>
+        <li>Si creás una clave de recuperación: tu frase, cifrada en tu navegador con esa clave. El servidor nunca recibe la clave.</li>
+        <li>Si compartís el progreso con un enlace: las rachas y los días recientes de los hábitos que elegiste, cifrados en tu navegador con una clave que solo tiene el enlace.</li>
+        <li>Si publicás un enlace de calendario: los nombres y horarios de tus hábitos y tareas con fecha, <strong>sin cifrar</strong>. El servidor, y cualquiera que tenga el enlace, puede leerlos. Al desactivar el enlace se borran.</li>
+        <li>Si activás los recordatorios: la dirección de notificaciones de tu navegador y las horas del día a las que enviar. Los recordatorios no llevan texto, y los entrega el servicio de notificaciones de tu navegador (Google, Mozilla, Apple o Microsoft).</li>
       </ul>
-
-      <h2>Sincronizar con GitHub</h2>
-      <p>Si sincronizás con un repositorio de GitHub, tus datos cifrados van directo de tu navegador a ese repositorio con tu propio token, bajo los términos de GitHub. Nunca pasan por el servidor de Habit Tracker.</p>
 
       <h2>Quién más interviene</h2>
       <p>El sitio está alojado en GitHub Pages y el servidor funciona en Cloudflare; si iniciás sesión con Google, Google se encarga de ese inicio de sesión. Como cualquier servicio web, procesan las solicitudes, incluida tu dirección IP, según sus propias políticas de privacidad. Habit Tracker no tiene publicidad, analíticas, cookies de seguimiento ni rastreadores de terceros, y nunca vende ni comparte tus datos.</p>

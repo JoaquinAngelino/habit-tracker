@@ -57,7 +57,7 @@ export function readEnvelope(bytes) {
 }
 
 function parseEnvelope(bytes) {
-  // Formats 1 and 2 were JSON text with base64 fields; GitHub branches may still hold them.
+  // Formats 1 and 2 were JSON text with base64 fields; a copy saved back then may still hold them.
   if (bytes[0] === 0x7b) {
     let e;
     try {

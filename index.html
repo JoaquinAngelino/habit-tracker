@@ -38,7 +38,6 @@
         <span class="field-label" data-i18n="syncWith">Sync with</span>
         <select id="syncMode">
           <option value="account" data-i18n="mode_account">Account</option>
-          <option value="github" data-i18n="mode_github">GitHub repository</option>
           <option value="none" data-i18n="mode_none">This device only</option>
         </select>
       </label>
@@ -53,22 +52,6 @@
           <div id="accountActions" class="row"></div>
           <div id="accountExtras" class="setting"></div>
         </div>
-      </div>
-      <div id="githubBlock" class="setting">
-        <label class="field">
-          <span class="field-label" data-i18n="repo">Repository</span>
-          <input id="repo" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="owner/habit-tracker">
-        </label>
-        <label class="field">
-          <span class="field-label" data-i18n="branch">Branch</span>
-          <input id="branch" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="data">
-        </label>
-        <p class="hint" data-i18n-html="branchHint"></p>
-        <label class="field">
-          <span class="field-label" data-i18n="token">GitHub token</span>
-          <input id="token" type="password" autocomplete="off" spellcheck="false">
-        </label>
-        <p class="hint" data-i18n-html="tokenHint"></p>
       </div>
     </div>
     <div id="passphraseBlock" class="setting">

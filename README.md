@@ -53,10 +53,9 @@ A task can have steps to check off, and can repeat daily, weekly or monthly: fin
 Everything saves in the browser first and works offline, including opening the app with no connection. **Settings → Sync with** picks where it also syncs, so every device you set up sees the same habits:
 
 - **Account**: sign in with Google or a passkey and your data syncs through the Habit Tracker server (see [Server](#server)).
-- **GitHub repository**: syncs to `data/habits.enc` on the `data` branch of a repository you own, with your own token.
 - **This device only**: no sync. New visitors start here.
 
-When syncing, the data is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent, so neither the server nor GitHub can read it. Use the same passphrase, of at least 8 characters, on every device. A lost passphrase cannot be recovered, and neither can the data. **Settings → Download my data** saves everything as a readable JSON file.
+When syncing, the data is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent, so the server cannot read it. Use the same passphrase, of at least 8 characters, on every device. A lost passphrase cannot be recovered, and neither can the data. **Settings → Download my data** saves everything as a readable JSON file.
 
 **Settings → Import data** adds a file to what is already there. It takes a file from **Download my data**, or a CSV with a `Date` column and either one column per habit or `habit` and `value` columns. Habits are matched by name and new ones are created. A CSV whose values are all Loop Habit Tracker's codes is read as its `Checkmarks.csv`: 2 is done and 3 is skipped. A check-in log like Habitify's (`Habit`, `Date`) and an export like Streaks' (`title`, `entry_date`, `entry_type`, `quantity`) are read as one row per entry. None of the three has been tried on a real export: the column names come from those apps' help pages and a community converter.
 
@@ -66,13 +65,7 @@ The copy on the device itself is compressed but not encrypted, in IndexedDB, wit
 
 Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Changes from other devices arrive when the app opens, when you come back to it after 2 minutes or more, or with **Sync now**. A save goes through only if nobody saved in between; otherwise the newer file is fetched and your unsynced edits are replayed on top of it, so edits from two devices merge. When both change the same thing, the last one synced wins: a habit's entry, skip or note for a day, the day's mood and note together, or a whole habit, task, goal or break. Editing something another device deleted brings it back.
 
-Data that has never synced merges into the first account or repository it syncs with. A device that switches between targets takes each one's data as it is, plus its own unsynced edits. A different Google account never receives data that came from another one: signing in with it starts empty, and the previous account's unsynced edits are dropped.
-
-### GitHub
-
-The `data` branch is created on first save and keeps data commits off the branch the site deploys from. Every save is a commit. The repository can be private; if it is public, anyone can download the file and try passphrases offline (use four or more random words), and commit times are visible.
-
-Create a fine-grained token limited to that repository with **Contents: Read and write**. It is sent only to `api.github.com`.
+Data that has never synced merges into the first account it syncs with. A different account never receives data that came from another one: signing in with it starts empty, and the previous account's unsynced edits are dropped.
 
 ### Account extras
 
@@ -88,7 +81,7 @@ Links and reminders are refreshed after a sync when what they show has changed. 
 
 ### Remember
 
-With **Remember** on, the passphrase, sign-in, email and token stay in `localStorage`; turn it off to keep them only until the tab closes. The habits themselves stay on the device either way, until **Sign out**.
+With **Remember** on, the passphrase, sign-in and email stay in `localStorage`; turn it off to keep them only until the tab closes. The habits themselves stay on the device either way, until **Sign out**.
 
 ## Server
 

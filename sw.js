@@ -16,7 +16,6 @@ const SHELL = [
   "src/app.js",
   "src/crypto.js",
   "src/extras.js",
-  "src/github.js",
   "src/http.js",
   "src/i18n.js",
   "src/ics.js",
