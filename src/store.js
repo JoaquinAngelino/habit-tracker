@@ -51,7 +51,7 @@ function fromSaved(saved, bytes, base) {
   const version = saved.version ?? saved.sha ?? null;
   return {
     target: saved.target ?? (version ? UNKNOWN_TARGET : null),
-    owner: saved.owner ?? null,
+    owner: saved.owner ?? (saved.target?.startsWith("account:") ? saved.target : null),
     merging: Boolean(saved.merging),
     version,
     bytes,

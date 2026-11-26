@@ -162,3 +162,12 @@ test("edits an old tab keeps in the pre-IndexedDB copy are picked up", async () 
   await store.ready();
   assert.deepEqual(store.data().habits.map((h) => h.id), ["h", "o"]);
 });
+
+test("another account's edits saved before owners were recorded are dropped, not uploaded", async () => {
+  const { account } = await fakeServer();
+  localStorage.setItem("ht.cache.v1", JSON.stringify({ target: "account:g0", sha: "1", envelope: null, base: { habits: [habit], log: {}, goals: [], tasks: [] }, pending: [{ t: "habit", habit: other }] }));
+  const store = open(account);
+  await store.sync();
+  assert.deepEqual(store.data().habits, []);
+  assert.equal(store.hasPending(), false);
+});
