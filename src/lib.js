@@ -26,7 +26,7 @@ export function localIso(d = new Date()) {
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
-export const emptyData = () => ({ v: 1, habits: [], log: {}, skips: {}, notes: {}, days: {}, pauses: [], goals: [], tasks: [] });
+export const emptyData = () => ({ v: 1, habits: [], log: {}, skips: {}, notes: {}, days: {}, breaks: [], goals: [], tasks: [] });
 
 // Unknown fields and habit types are kept, so an older version never drops what a newer one saved.
 export function normalize(data) {
@@ -39,7 +39,7 @@ export function normalize(data) {
     habits: list(data.habits).filter((h) => h?.id),
     goals: list(data.goals).filter((g) => g?.id && g.habitId),
     tasks: list(data.tasks).filter((x) => x?.id),
-    pauses: list(data.pauses).filter((p) => p?.id && p.from && p.to),
+    breaks: list(data.breaks).filter((p) => p?.id && p.from && p.to),
     log: map(data.log),
     skips: map(data.skips),
     notes: map(data.notes),
@@ -54,22 +54,23 @@ export const note = (data, id, date) => data.notes?.[date]?.[id] ?? "";
 // A timer is an amount counted in minutes.
 export const isAmount = (habit) => habit.type === "amount" || habit.type === "timer";
 
-// Only habits measured per day can have a schedule: chosen weekdays, every N days from the start, or single days skipped.
+// Only habits measured per day can have a schedule: chosen weekdays, every N days, or single days skipped.
+// Every N days counts from `everyFrom`, fixed when the interval is chosen, so moving the start date leaves the days where they were.
 export const canSchedule = (habit) => habit.type === "check" || isAmount(habit);
 export const isSkipped = (data, id, date) => Boolean(data.skips?.[date]?.[id]);
 
 export function isScheduled(habit, date) {
   if (!canSchedule(habit)) return true;
-  if (habit.every > 1) return daysBetween(habit.start, date) % habit.every === 0;
+  if (habit.every > 1) return daysBetween(habit.everyFrom ?? habit.start, date) % habit.every === 0;
   return !habit.days?.length || habit.days.includes(weekday(date));
 }
 
 // A break covers one habit or, with no habit named, all of them. Avoid habits keep counting through it.
-export const isPaused = (data, habit, date) =>
-  habit.type !== "avoid" && (data.pauses ?? []).some((p) => (!p.habitId || p.habitId === habit.id) && p.from <= date && date <= p.to);
+export const isOnBreak = (data, habit, date) =>
+  habit.type !== "avoid" && (data.breaks ?? []).some((p) => (!p.habitId || p.habitId === habit.id) && p.from <= date && date <= p.to);
 
 export const isOff = (data, habit, date) =>
-  isPaused(data, habit, date) || (canSchedule(habit) && (isSkipped(data, habit.id, date) || !isScheduled(habit, date)));
+  isOnBreak(data, habit, date) || (canSchedule(habit) && (isSkipped(data, habit.id, date) || !isScheduled(habit, date)));
 
 // For an avoid habit the logged value marks a slip, so an empty day is a good one.
 export function isDone(habit, value) {
@@ -109,14 +110,13 @@ function periodMet(data, habit, date) {
   return isDone(habit, entry(data, habit.id, date));
 }
 
-// A day off neither extends nor breaks a streak and is left out of the rate, unless the target was met anyway.
-// A week or month counts as off when a break touches it.
-function excused(data, habit, date) {
-  if (periodMet(data, habit, date)) return false;
+// A period that is off neither extends nor breaks a streak and is left out of the rate, unless its target was met
+// anyway. A week or month is off when a break touches it.
+function periodOff(data, habit, date) {
   const p = PERIODS[periodOf(habit)];
   if (p === PERIODS.day) return isOff(data, habit, date);
-  if (!data.pauses?.length) return false;
-  for (let d = p.start(date), end = p.next(d); d < end; d = addDays(d, 1)) if (isPaused(data, habit, d)) return true;
+  if (!data.breaks?.length) return false;
+  for (let d = p.start(date), end = p.next(d); d < end; d = addDays(d, 1)) if (isOnBreak(data, habit, d)) return true;
   return false;
 }
 
@@ -128,16 +128,16 @@ export function streak(data, habit, today) {
   let best = 0;
   let run = 0;
   for (let d = first; d <= last; d = p.next(d)) {
-    if (excused(data, habit, d)) continue;
-    run = periodMet(data, habit, d) ? run + 1 : 0;
+    const met = periodMet(data, habit, d);
+    if (!met && periodOff(data, habit, d)) continue;
+    run = met ? run + 1 : 0;
     best = Math.max(best, run);
   }
   let current = 0;
   let d = stillOpen(data, habit, last) ? p.prev(last) : last;
   for (; d >= first; d = p.prev(d)) {
-    if (excused(data, habit, d)) continue;
-    if (!periodMet(data, habit, d)) break;
-    current++;
+    if (periodMet(data, habit, d)) current++;
+    else if (!periodOff(data, habit, d)) break;
   }
   return { current, best, unit: periodOf(habit) };
 }
@@ -147,8 +147,8 @@ export function rate(data, habit, today, days) {
   let hit = 0;
   let total = 0;
   for (let d = first; d <= last; d = p.next(d)) {
-    if ((d === last && stillOpen(data, habit, d)) || excused(data, habit, d)) continue;
     const met = periodMet(data, habit, d);
+    if (!met && ((d === last && habit.type !== "avoid") || periodOff(data, habit, d))) continue;
     total++;
     if (met) hit++;
   }
@@ -163,6 +163,12 @@ export function level(data, habit, date, today) {
   if (habit.type === "avoid") return v ? -1 : 4;
   if (isAmount(habit)) return v > 0 ? Math.min(4, Math.ceil((v / (habit.target || 1)) * 4)) : 0;
   return v > 0 ? 4 : 0;
+}
+
+// Levels of the last `weeks` weeks, Monday first, up to the end of this week; days still to come are null.
+export function recentLevels(data, habit, today, weeks) {
+  const first = addDays(weekStart(today), -7 * (weeks - 1));
+  return Array.from({ length: weeks * 7 }, (_, i) => level(data, habit, addDays(first, i), today));
 }
 
 export function goalProgress(data, goal, habit, today) {
@@ -196,43 +202,73 @@ function upsert(list, item) {
 }
 
 // Each keeps one value per habit per day.
-const DAY_MAPS = { log: "log", skip: "skips", note: "notes" };
+const HABIT_DAY_MAPS = { log: "log", skip: "skips", note: "notes" };
 
-// Next due date of a repeating task: the first one after today, counted from its due date.
-export function nextDue(due, repeat, today) {
-  let d = due || today;
-  do d = repeat === "daily" ? addDays(d, 1) : repeat === "weekly" ? addDays(d, 7) : addMonths(d, 1);
-  while (d <= today);
-  return d;
+// Next due date of a repeating task: the first one after both today and its due date. It is counted from
+// `anchor`, the first due date of the series, so a task due on the 31st comes back to the 31st after February.
+export function nextDue({ due, repeat, anchor }, today) {
+  const from = anchor || due || today;
+  const after = later(due || today, today);
+  for (let k = 1; ; k++) {
+    const d = repeat === "daily" ? addDays(from, k) : repeat === "weekly" ? addDays(from, 7 * k) : addMonths(from, k);
+    if (d > after) return d;
+  }
 }
 
+// Finishing a repeating task opens its next one, with the steps to do again. The done one remembers which.
+export function completeTask(task, today, newId) {
+  if (!task.repeat) return [{ t: "task", task: { ...task, done: today } }];
+  const next = { ...task, id: newId(), due: nextDue(task, today), anchor: task.anchor || task.due || today, created: today };
+  if (task.steps) next.steps = task.steps.map((s) => ({ ...s, id: newId(), done: false }));
+  return [{ t: "task", task: next }, { t: "task", task: { ...task, done: today, nextId: next.id } }];
+}
+
+// Undoing takes back the task it opened, unless that one was finished meanwhile.
+export function reopenTask(task, tasks) {
+  const { nextId, ...rest } = task;
+  const next = tasks.find((x) => x.id === nextId);
+  return [...(next && !next.done ? [{ t: "delTask", id: next.id }] : []), { t: "task", task: { ...rest, done: "" } }];
+}
+
+const MAX_TIMER_MINUTES = 24 * 60;
+
+// To the nearest minute; a timer that ran at all counts for one, and one left running stops counting after a day.
+export const timerMinutes = (startMs, nowMs) => Math.min(MAX_TIMER_MINUTES, Math.max(1, Math.round((nowMs - startMs) / 60000)));
+
+const compactDay = (day) => Object.fromEntries(Object.entries(day).filter(([, v]) => v));
+
 export function applyOp(data, op) {
-  if (DAY_MAPS[op.t]) {
-    const days = (data[DAY_MAPS[op.t]] ??= {});
+  if (HABIT_DAY_MAPS[op.t]) {
+    const days = (data[HABIT_DAY_MAPS[op.t]] ??= {});
     const day = (days[op.date] ??= {});
     if (op.v) day[op.id] = op.v;
     else delete day[op.id];
     if (!Object.keys(day).length) delete days[op.date];
   } else if (op.t === "day") {
+    // A patch, so mood set on one device and a note typed on another both stay.
+    const day = compactDay({ ...data.days?.[op.date], ...op.patch });
     data.days ??= {};
-    if (Object.values(op.day ?? {}).some(Boolean)) data.days[op.date] = op.day;
+    if (Object.keys(day).length) data.days[op.date] = day;
     else delete data.days[op.date];
-  } else if (op.t === "pause") {
-    upsert((data.pauses ??= []), op.pause);
-  } else if (op.t === "delPause") {
-    data.pauses = (data.pauses ?? []).filter((p) => p.id !== op.id);
+  } else if (op.t === "break") {
+    upsert((data.breaks ??= []), op.break);
+  } else if (op.t === "delBreak") {
+    data.breaks = (data.breaks ?? []).filter((p) => p.id !== op.id);
+  } else if (op.t === "share") {
+    if (op.share) data.share = op.share;
+    else delete data.share;
   } else if (op.t === "order") {
     const at = new Map(op.ids.map((id, i) => [id, i]));
     data.habits = data.habits.map((h, i) => [h, at.get(h.id) ?? op.ids.length + i]).sort((a, b) => a[1] - b[1]).map(([h]) => h);
   } else if (op.t === "import") {
-    Object.assign(data, merge(data, normalize(op.data)));
+    Object.assign(data, addMissing(data, normalize(op.data)));
   } else if (op.t === "habit") {
     upsert(data.habits, op.habit);
   } else if (op.t === "delHabit") {
     data.habits = data.habits.filter((h) => h.id !== op.id);
     data.goals = data.goals.filter((g) => g.habitId !== op.id);
-    data.pauses = (data.pauses ?? []).filter((p) => p.habitId !== op.id);
-    for (const [t, name] of Object.entries(DAY_MAPS)) {
+    data.breaks = (data.breaks ?? []).filter((p) => p.habitId !== op.id);
+    for (const [t, name] of Object.entries(HABIT_DAY_MAPS)) {
       for (const date of Object.keys(data[name] ?? {})) applyOp(data, { t, date, id: op.id, v: 0 });
     }
   } else if (op.t === "goal") {
@@ -252,7 +288,7 @@ export function applyOp(data, op) {
 
 export const replay = (base, ops) => ops.reduce(applyOp, structuredClone(base));
 
-const LISTS = ["habits", "goals", "tasks", "pauses"];
+const LISTS = ["habits", "goals", "tasks", "breaks"];
 
 // `device` added into `base`: its habits, goals, tasks and breaks replace those with the same id, and its entries for a day win.
 export function merge(base, device) {
@@ -265,20 +301,33 @@ export function merge(base, device) {
       else at.set(item.id, out[kind].push(item) - 1);
     }
   }
-  for (const name of Object.values(DAY_MAPS)) {
+  for (const name of Object.values(HABIT_DAY_MAPS)) {
     for (const [date, day] of Object.entries(device[name] ?? {})) (out[name] ??= {})[date] = { ...out[name][date], ...day };
   }
-  out.days = { ...out.days, ...device.days };
+  for (const [date, day] of Object.entries(device.days ?? {})) (out.days ??= {})[date] = { ...out.days[date], ...day };
+  if (device.share) out.share = device.share;
+  return out;
+}
+
+// What an imported file adds: items and entries the data does not have. What is already there stays as it is,
+// in its order, so importing an older backup changes nothing it already holds.
+function addMissing(data, incoming) {
+  const out = merge(incoming, data);
+  for (const kind of LISTS) {
+    const mine = new Set((data[kind] ?? []).map((item) => item.id));
+    out[kind] = [...(data[kind] ?? []), ...(incoming[kind] ?? []).filter((item) => !mine.has(item.id))];
+  }
   return out;
 }
 
 export const hasData = (data) =>
-  LISTS.some((kind) => data[kind]?.length) || [...Object.values(DAY_MAPS), "days"].some((name) => Object.keys(data[name] ?? {}).length > 0);
+  LISTS.some((kind) => data[kind]?.length) || [...Object.values(HABIT_DAY_MAPS), "days"].some((name) => Object.keys(data[name] ?? {}).length > 0);
 
 function opKey(op) {
-  if (DAY_MAPS[op.t]) return `${op.t}:${op.date}:${op.id}`;
-  if (op.t === "day") return `day:${op.date}`;
-  const item = op.habit ?? op.goal ?? op.task ?? op.pause;
+  if (HABIT_DAY_MAPS[op.t]) return `${op.t}:${op.date}:${op.id}`;
+  if (op.t === "share") return "share";
+  if (op.t === "day") return `day:${op.date}:${Object.keys(op.patch)}`;
+  const item = op.habit ?? op.goal ?? op.task ?? op.break;
   return item ? `${op.t}:${item.id}` : null;
 }
 

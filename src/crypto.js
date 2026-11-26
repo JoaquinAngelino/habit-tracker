@@ -17,6 +17,8 @@ export const toB64 = (bytes) => {
   return btoa(s);
 };
 export const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+export const toB64url = (bytes) => toB64(new Uint8Array(bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+export const fromB64url = (s) => fromB64(s.replace(/-/g, "+").replace(/_/g, "/"));
 
 const pipe = async (bytes, stream) => new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
 export const packJson = (value) => pipe(encoder.encode(JSON.stringify(value)), new CompressionStream("gzip"));
@@ -97,4 +99,39 @@ export async function wrap(text, secret) {
 export async function unwrap(bytes, secret) {
   const key = await deriveKey(secret, bytes.slice(0, WRAP_IV_AT), ITERATIONS);
   return decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(WRAP_IV_AT, WRAP_DATA_AT) }, key, bytes.slice(WRAP_DATA_AT)));
+}
+
+// A share link's key is random already, so it is used as it is: a 12-byte IV, then AES-GCM.
+export const newKey = () => toB64url(crypto.getRandomValues(new Uint8Array(32)));
+const rawKey = (key) => crypto.subtle.importKey("raw", fromB64url(key), "AES-GCM", false, ["encrypt", "decrypt"]);
+
+export async function sealWithKey(text, key) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await rawKey(key), encoder.encode(text)));
+  const out = new Uint8Array(iv.length + data.length);
+  out.set(iv);
+  out.set(data, iv.length);
+  return out;
+}
+
+export const openWithKey = async (bytes, key) =>
+  decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, 12) }, await rawKey(key), bytes.slice(12)));
+
+// Letters and digits that are hard to mix up when copied by hand.
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
+const CODE_LENGTH = 24;
+// Bytes past the last full run of the alphabet would favour its first letters.
+const CODE_BYTE_LIMIT = 256 - (256 % CODE_ALPHABET.length);
+
+export const cleanCode = (text) => text.toUpperCase().replace(/[^A-Z0-9]/g, "");
+export const formatCode = (code) => code.replace(/(.{4})(?=.)/g, "$1-");
+
+export function newRecoveryCode() {
+  let code = "";
+  while (code.length < CODE_LENGTH) {
+    for (const b of crypto.getRandomValues(new Uint8Array(CODE_LENGTH))) {
+      if (b < CODE_BYTE_LIMIT && code.length < CODE_LENGTH) code += CODE_ALPHABET[b % CODE_ALPHABET.length];
+    }
+  }
+  return code;
 }

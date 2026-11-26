@@ -1,15 +1,15 @@
-import { $, el, icon, iconButton } from "./ui.js";
-import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, level, goalProgress, canSchedule, isSkipped, isPaused, isOff, nextDue } from "./lib.js";
-import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap } from "./insights.js";
+import { $, el, icon, iconButton, mark } from "./ui.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, timerMinutes } from "./lib.js";
+import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress } from "./insights.js";
 import { toIcs } from "./ics.js";
 import { importFile } from "./importer.js";
-import { drawCard } from "./share.js";
+import { drawCard } from "./card.js";
 import { createStore } from "./store.js";
 import { local, session, read, write } from "./storage.js";
-import { fromB64, wrap, unwrap } from "./crypto.js";
-import { t, setLanguage, getLanguage, applyTranslations } from "./i18n.js";
-import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, publishLink, removeLink, feedUrl, saveRecovery, readRecovery, passkeyCount, removePasskeys } from "./server.js";
-import { buildShare, randomKey, newRecoveryCode, cleanCode, formatCode, utcMinutes, canRemind, syncReminders, createPasskey, usePasskey } from "./extras.js";
+import { fromB64url, wrap, unwrap, newKey, sealWithKey, newRecoveryCode, cleanCode, formatCode } from "./crypto.js";
+import { t, setLanguage, getLanguage, applyTranslations, streakText as streakWording } from "./i18n.js";
+import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, publishedLinks, publishLink, updateLink, removeLink, feedUrl, saveRecovery, readRecovery, passkeyCount, removePasskeys } from "./server.js";
+import { utcMinutes, canRemind, setDeviceReminders, stopDeviceReminders, createPasskey, usePasskey } from "./account.js";
 
 const CONFIG_KEY = "ht.config";
 const PASS_KEY = "ht.passphrase";
@@ -22,9 +22,8 @@ const VIEWS = ["today", "tasks", "progress", "habits"];
 const TIMER_KEY = "ht.timer";
 const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, timer: 20, avoid: 1 };
 const HEATMAP_WEEKS = 53;
-const SHARE_WEEKS = 26;
+const CARD_WEEKS = 26;
 const MOODS = [1, 2, 3, 4, 5];
-const MAX_TIMER_MINUTES = 24 * 60;
 const TEMPLATES = [
   { key: "water", type: "amount", target: 8, unit: "glasses" },
   { key: "read", type: "amount", target: 20, unit: "pages" },
@@ -46,12 +45,14 @@ const ui = {
   taskFilter: "all",
   goalDraft: null,
   noteOpen: null,
-  week: 0,
+  weeksBack: 0,
   year: null,
   timer: loadTimer(),
-  extraNote: "",
+  accountNote: "",
   recovering: false,
-  published: {},
+  // What the account has published, as the server lists it; null until asked.
+  links: null,
+  publishedAt: null,
   focus: null,
   status: { state: "off", err: null },
   syncedAt: null,
@@ -74,9 +75,7 @@ function loadSettings() {
   } catch {
     /* start from the defaults */
   }
-  // A device that synced with a GitHub repository, which is no longer offered, keeps its data on the device only.
-  const { repo, branch, ...kept } = saved;
-  return { ...defaults, ...kept, mode: MODES.includes(saved.mode) ? saved.mode : "none" };
+  return { ...defaults, ...saved, mode: MODES.includes(saved.mode) ? saved.mode : "none" };
 }
 
 const settings = loadSettings();
@@ -87,9 +86,6 @@ function saveSecret(key, value) {
   write(session, key, settings.remember ? null : value || null);
   write(local, key, settings.remember ? value || null : null);
 }
-
-// A GitHub token from when repositories could be synced with has no use left.
-for (const kind of [local, session]) write(kind, "ht.token", null);
 
 // Earlier versions kept the email with the settings, whatever Remember said.
 if (settings.email) {
@@ -133,7 +129,7 @@ const unitOf = (habit) => (habit.type === "timer" ? t("minutes") : (habit.unit ?
 const groupOf = (habit) => (habit.group ?? "").trim();
 // 2024 began on a Monday.
 const weekdayName = (i, weekday) => formatter(Intl.DateTimeFormat, { weekday }).format(new Date(2024, 0, 1 + i));
-const byTime = (list) => [...list].sort((a, b) => ((a.time || "~") < (b.time || "~") ? -1 : (a.time || "~") > (b.time || "~") ? 1 : 0));
+const byTime = (list) => [...list].sort((a, b) => (a.time || "~").localeCompare(b.time || "~"));
 
 // Streaks and rates walk a habit's whole history, so they are recomputed only when that habit's data changes.
 const memo = new Map();
@@ -146,20 +142,24 @@ function remember(habit, name, compute) {
   memo.set(key, { stamp, value });
   return value;
 }
+// For figures that read all the data: recomputed when any of it, the day or `scope` changes.
+function rememberAll(name, scope, compute) {
+  const stamp = `${store.version()}:${today()}:${scope}`;
+  const hit = memo.get(name);
+  if (hit?.stamp === stamp) return hit.value;
+  const value = compute();
+  memo.set(name, { stamp, value });
+  return value;
+}
 const streakOf = (habit) => remember(habit, "streak", () => streak(data(), habit, today()));
 const rateOf = (habit, days) => remember(habit, `rate${days}`, () => rate(data(), habit, today(), days));
 
-function streakText(habit, s) {
-  if (habit.type === "avoid") return t("clean", { units: units(s.current, "day") });
-  return s.current ? t("streak", { units: units(s.current, s.unit) }) : t("noStreak");
-}
+const streakText = (habit, s) => streakWording(habit.type === "avoid", s);
 
 function goalUnit(habit) {
   if (isAmount(habit)) return unitOf(habit) || t("unit_total");
   return t(habit.type === "avoid" ? "unit_clean" : "unit_times");
 }
-
-const mark = (text, tone) => el("span", { class: "mark", "data-tone": tone, textContent: text });
 
 function textButton(label, onclick, { small = false, plus = false, danger = false } = {}) {
   return el("button", { type: "button", class: `btn-text${small ? " btn-small" : ""}${danger ? " btn-danger" : ""}`, onclick }, [
@@ -168,7 +168,7 @@ function textButton(label, onclick, { small = false, plus = false, danger = fals
   ]);
 }
 
-// With nothing to say when empty, an empty lane is only its heading.
+// No empty text: only the heading shows.
 function lane(tone, title, { count = "", tools = [], rows, empty }) {
   return el("section", { class: "lane", "data-tone": tone }, [
     el("div", { class: "lane-head" }, [
@@ -235,15 +235,9 @@ function taskTape(task) {
   });
 }
 
-// Finishing a repeating task leaves it done and opens its next one, with the steps to do again.
 function toggleTask(task) {
-  if (task.done) return patchTask(task.id, { done: "" });
-  if (task.repeat) {
-    const next = { ...task, id: uid(), due: nextDue(task.due, task.repeat, today()), created: today() };
-    if (task.steps) next.steps = task.steps.map((s) => ({ ...s, id: uid(), done: false }));
-    store.commit({ t: "task", task: next }, { quiet: true });
-  }
-  patchTask(task.id, { done: today(), repeat: "" });
+  const ops = task.done ? reopenTask(task, data().tasks) : completeTask(task, today(), uid);
+  ops.forEach((op, i) => store.commit(op, { quiet: i < ops.length - 1 }));
 }
 
 function stepsMark(task) {
@@ -441,15 +435,13 @@ function saveTimer(timer) {
   write(local, TIMER_KEY, timer ? JSON.stringify(timer) : null);
 }
 
-// Logged on the day it started, to the nearest minute; a timer that ran at all counts for one.
+// Logged on the day it started. Read again first: another tab may have stopped or replaced it.
 function stopTimer() {
-  const timer = ui.timer;
-  if (!timer) return;
+  const timer = loadTimer();
   saveTimer(null);
-  const habit = habits().find((h) => h.id === timer.id);
+  const habit = timer && habits().find((h) => h.id === timer.id);
   if (!habit) return render();
-  const minutes = Math.min(MAX_TIMER_MINUTES, Math.max(1, Math.round((Date.now() - timer.at) / 60000)));
-  setLog(habit, timer.day, entry(data(), habit.id, timer.day) + minutes);
+  setLog(habit, timer.day, entry(data(), habit.id, timer.day) + timerMinutes(timer.at, Date.now()));
 }
 
 function timerButton(habit) {
@@ -469,9 +461,40 @@ function timerButton(habit) {
   });
 }
 
+const noteKey = (habit) => `${habit.id}:note`;
+
+function openNote(habit, day) {
+  ui.noteOpen = `${habit.id}:${day}`;
+  ui.focus = noteKey(habit);
+  render();
+}
+
+// Shown once there is a note, or while one is being started.
+function noteField(habit, day) {
+  const text = note(data(), habit.id, day);
+  if (!text && ui.noteOpen !== `${habit.id}:${day}`) return null;
+  const save = (v, opts) => store.commit({ t: "note", date: day, id: habit.id, v }, opts);
+  const input = el("input", {
+    class: "title-input note-input",
+    value: text,
+    maxLength: 500,
+    placeholder: t("notePlaceholder"),
+    "aria-label": t("noteFor", { name: habitName(habit) }),
+    "data-focus-key": noteKey(habit),
+    oninput: () => save(input.value, { quiet: true }),
+    onchange: () => {
+      if (input.value.trim()) return;
+      ui.noteOpen = null;
+      save("");
+    },
+    onkeydown: (e) => e.key === "Enter" && input.blur(),
+  });
+  return input;
+}
+
 function offMark(d, habit, day) {
   if (isSkipped(d, habit.id, day)) return t("skipped");
-  return t(isPaused(d, habit, day) ? "onBreak" : "notScheduled");
+  return t(isOnBreak(d, habit, day) ? "onBreak" : "notScheduled");
 }
 
 function todayRow(habit, day) {
@@ -484,39 +507,13 @@ function todayRow(habit, day) {
     marks.push(mark(t(habit.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, habit, day), target: habit.target })));
   }
   if (isAmount(habit) && unitOf(habit)) marks.push(mark(unitOf(habit)));
-  const off = isOff(d, habit, day);
-  if (!value && off) marks.push(mark(offMark(d, habit, day)));
+  const dayOff = isOff(d, habit, day);
+  if (!value && dayOff) marks.push(mark(offMark(d, habit, day)));
   if (isSkipped(d, habit.id, day)) marks.push(textButton(t("undoSkip"), () => setSkip(habit, day, false), { small: true }));
-  else if (canSchedule(habit) && !isDone(habit, value) && !off) marks.push(textButton(t("skip"), () => setSkip(habit, day, true), { small: true }));
+  else if (canSchedule(habit) && !isDone(habit, value) && !dayOff) marks.push(textButton(t("skip"), () => setSkip(habit, day, true), { small: true }));
 
-  const text = note(d, habit.id, day);
-  const noteKey = `${habit.id}:note`;
-  const openKey = `${habit.id}:${day}`;
-  const setNote = (v, opts) => store.commit({ t: "note", date: day, id: habit.id, v }, opts);
-  let noteInput = null;
-  if (text || ui.noteOpen === openKey) {
-    noteInput = el("input", {
-      class: "title-input note-input",
-      value: text,
-      maxLength: 500,
-      placeholder: t("notePlaceholder"),
-      "aria-label": t("noteFor", { name: habitName(habit) }),
-      "data-focus-key": noteKey,
-      oninput: () => setNote(noteInput.value, { quiet: true }),
-      onchange: () => {
-        if (noteInput.value.trim()) return;
-        ui.noteOpen = null;
-        setNote("");
-      },
-      onkeydown: (e) => e.key === "Enter" && noteInput.blur(),
-    });
-  } else {
-    marks.push(textButton(t("addNote"), () => {
-      ui.noteOpen = openKey;
-      ui.focus = noteKey;
-      render();
-    }, { small: true }));
-  }
+  const noteInput = noteField(habit, day);
+  if (!noteInput) marks.push(textButton(t("addNote"), () => openNote(habit, day), { small: true }));
 
   const actions = [];
   if (habit.type === "timer") {
@@ -535,7 +532,6 @@ function todayRow(habit, day) {
   });
 }
 
-// A group of habits, such as a morning routine, listed together in the order they are done.
 function groupLane(name, list, day) {
   const d = data();
   const done = list.filter((h) => isDone(h, entry(d, h.id, day))).length;
@@ -547,21 +543,31 @@ function groupLane(name, list, day) {
   });
 }
 
-function dayLane(day) {
-  const current = data().days?.[day] ?? {};
-  const set = (patch, opts) => store.commit({ t: "day", date: day, day: { ...(data().days?.[day] ?? {}), ...patch } }, opts);
-  const scale = (field, label) => el("span", { class: "days", role: "group", "aria-label": t(field) }, MOODS.map((m) =>
+// A row of toggle buttons, as for weekdays or a 1 to 5 scale.
+function toggleRow(label, items) {
+  return el("span", { class: "days", role: "group", "aria-label": label }, items.map((item) =>
     el("button", {
       type: "button",
       class: "day",
-      "aria-pressed": String(current[field] === m),
-      "aria-label": label(m),
-      title: label(m),
-      "data-focus-key": `day:${field}${m}`,
-      textContent: String(m),
-      onclick: () => set({ [field]: current[field] === m ? 0 : m }),
+      "aria-pressed": String(item.on),
+      "aria-label": item.label,
+      title: item.label,
+      "data-focus-key": item.key,
+      textContent: item.text,
+      onclick: item.pick,
     })));
-  const moods = scale("mood", (m) => t(`mood_${m}`));
+}
+
+function dayLane(day) {
+  const current = data().days?.[day] ?? {};
+  const set = (patch, opts) => store.commit({ t: "day", date: day, patch }, opts);
+  const scale = (field, label) => toggleRow(t(field), MOODS.map((m) => ({
+    on: current[field] === m,
+    label: label(m),
+    key: `day:${field}${m}`,
+    text: String(m),
+    pick: () => set({ [field]: current[field] === m ? 0 : m }),
+  })));
   const text = el("input", {
     class: "title-input note-input",
     value: current.note ?? "",
@@ -577,7 +583,7 @@ function dayLane(day) {
       el("article", { class: "item" }, [
         el("div", { class: "item-meta" }, [
           el("span", { class: "meta-label", textContent: t("mood") }),
-          moods,
+          scale("mood", (m) => t(`mood_${m}`)),
           current.mood ? mark(t(`mood_${current.mood}`)) : null,
           el("span", { class: "meta-label", textContent: t("energy") }),
           scale("energy", (m) => t("energyLevel", { level: m })),
@@ -600,13 +606,19 @@ function dueLane(day) {
   });
 }
 
+function emptyToday(groups, started) {
+  if (groups.length) return null;
+  if (!activeHabits().length) return firstHabitLink();
+  return t(started.length ? "allOff" : "noneStarted");
+}
+
 function todayView() {
   const day = ui.day;
   const now = today();
   const started = byTime(activeHabits().filter((h) => h.start <= day));
   // A day off still lists the habit, apart, so it can be logged anyway; logging moves it back.
-  const off = started.filter((h) => !entry(data(), h.id, day) && isOff(data(), h, day));
-  const due = started.filter((h) => !off.includes(h));
+  const offHabits = started.filter((h) => !entry(data(), h.id, day) && isOff(data(), h, day));
+  const due = started.filter((h) => !offHabits.includes(h));
   const done = due.filter((h) => isDone(h, entry(data(), h.id, day))).length;
   const groups = [...new Set(due.map(groupOf).filter(Boolean))];
   const go = (to) => {
@@ -622,10 +634,10 @@ function todayView() {
         iconButton("right", t("nextDay"), () => go(addDays(day, 1)), { disabled: day >= now }),
       ],
       rows: due.filter((h) => !groupOf(h)).map((h) => todayRow(h, day)),
-      empty: groups.length ? null : !activeHabits().length ? firstHabitLink() : started.length ? t("allOff") : t("noneStarted"),
+      empty: emptyToday(groups, started),
     }),
     ...groups.map((name) => groupLane(name, due.filter((h) => groupOf(h) === name), day)),
-    off.length ? lane("muted", t("dayOff"), { count: t("habits", { count: off.length }), rows: off.map((h) => todayRow(h, day)) }) : null,
+    offHabits.length ? lane("muted", t("dayOff"), { count: t("habits", { count: offHabits.length }), rows: offHabits.map((h) => todayRow(h, day)) }) : null,
     dueLane(day),
     activeHabits().length ? dayLane(day) : null,
   ];
@@ -745,10 +757,11 @@ function heatmap(habit) {
   const d = data();
   const now = today();
   const first = addDays(weekStart(now), -7 * (HEATMAP_WEEKS - 1));
+  const levels = recentLevels(d, habit, now, HEATMAP_WEEKS);
   const cells = [];
-  for (let i = 0; i < HEATMAP_WEEKS * 7; i++) {
+  for (let i = 0; i < levels.length; i++) {
     const date = addDays(first, i);
-    const lvl = date > now ? null : level(d, habit, date, now) ?? "before";
+    const lvl = date > now ? null : levels[i] ?? "before";
     const text = lvl == null || lvl === "before" ? "" : `${fmtDay(date)}: ${cellText(habit, entry(d, habit.id, date), lvl)}`;
     cells.push(el("span", { class: "cell", "data-level": lvl ?? "none", title: text }));
   }
@@ -757,13 +770,13 @@ function heatmap(habit) {
   ]);
 }
 
-function pattern(habit) {
-  const rates = remember(habit, "pattern", () => weekdayPattern(data(), habit, today()));
+function weekdayBars(habit) {
+  const rates = remember(habit, "weekdayBars", () => weekdayPattern(data(), habit, today()));
   if (rates.every((r) => r == null)) return null;
-  return el("div", { class: "pattern", role: "img", "aria-label": t("byWeekday"), title: t("byWeekday") }, rates.map((r, i) =>
-    el("span", { class: "pattern-day", title: `${weekdayName(i, "long")}: ${percent(r)}` }, [
-      el("span", { class: "pattern-track" }, [el("span", { class: "pattern-bar", style: `height:${Math.round((r ?? 0) * 100)}%` })]),
-      el("span", { class: "pattern-label", textContent: weekdayName(i, "narrow") }),
+  return el("div", { class: "weekday-bars", role: "img", "aria-label": t("byWeekday"), title: t("byWeekday") }, rates.map((r, i) =>
+    el("span", { class: "weekday-bar", title: `${weekdayName(i, "long")}: ${percent(r)}` }, [
+      el("span", { class: "weekday-track" }, [el("span", { class: "weekday-fill", style: `height:${Math.round((r ?? 0) * 100)}%` })]),
+      el("span", { class: "weekday-label", textContent: weekdayName(i, "narrow") }),
     ])));
 }
 
@@ -773,46 +786,39 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
-// Shared through the system sheet where the browser can share files, downloaded otherwise.
-async function shareCard(habit) {
+async function streakCard(habit) {
   const s = streakOf(habit);
-  const now = today();
   const css = getComputedStyle(document.documentElement);
-  const first = addDays(weekStart(now), -7 * (SHARE_WEEKS - 1));
   const canvas = drawCard({
     name: habitName(habit),
     label: t(habit.type === "avoid" ? "cleanLabel" : "streakLabel"),
     big: units(s.current, s.unit),
     lines: [`${t("bestLabel")}: ${units(s.best, s.unit)}`, `${t("last30")}: ${percent(rateOf(habit, 30))}`],
-    cells: Array.from({ length: SHARE_WEEKS * 7 }, (_, i) => (addDays(first, i) > now ? null : level(data(), habit, addDays(first, i), now))),
+    cells: recentLevels(data(), habit, today(), CARD_WEEKS),
     footer: t("title"),
     colors: Object.fromEntries(["panel", "ink", "muted", "green", "red"].map((name) => [name, css.getPropertyValue(`--${name}`).trim()])),
   });
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
   if (!blob) return;
   const file = new File([blob], "streak.png", { type: "image/png" });
-  if (navigator.canShare?.({ files: [file] })) {
-    try {
-      await navigator.share({ files: [file], title: habitName(habit) });
-    } catch {
-      /* closed without sharing */
-    }
-    return;
+  if (!navigator.canShare?.({ files: [file] })) return download(blob, "streak.png");
+  try {
+    await navigator.share({ files: [file], title: habitName(habit) });
+  } catch {
+    /* closed without sharing */
   }
-  download(blob, "streak.png");
 }
 
 const insight = (text) => el("article", { class: "item" }, [el("p", { class: "item-title", textContent: text })]);
 
 function weekLane(active) {
   const now = today();
-  const start = addDays(weekStart(now), -7 * ui.week);
-  const week = weekReview(data(), active, start, now);
-  const before = weekReview(data(), active, addDays(start, -7), now);
+  const start = addDays(weekStart(now), -7 * ui.weeksBack);
+  const [week, before] = rememberAll("week", ui.weeksBack, () => [weekReview(data(), active, start, now), weekReview(data(), active, addDays(start, -7), now)]);
   const delta = week.rate != null && before.rate != null ? Math.round((week.rate - before.rate) * 100) : null;
   const short = { month: "short", day: "numeric" };
   const move = (n) => {
-    ui.week += n;
+    ui.weeksBack += n;
     render();
   };
   const summary = el("article", { class: "item" }, [
@@ -826,25 +832,24 @@ function weekLane(active) {
   ]);
   return lane("green", t("weekReview"), {
     count: `${fmtDay(week.start, short)} – ${fmtDay(week.end, short)}`,
-    tools: [iconButton("left", t("prevWeek"), () => move(1)), iconButton("right", t("nextWeek"), () => move(-1), { disabled: !ui.week })],
+    tools: [iconButton("left", t("prevWeek"), () => move(1)), iconButton("right", t("nextWeek"), () => move(-1), { disabled: !ui.weeksBack })],
     rows: [summary],
   });
 }
 
-function patternsLane(active) {
-  const now = today();
+function linksLane(active) {
+  const [pairs, moods] = rememberAll("links", "", () => [correlations(data(), active, today()), moodLinks(data(), active, today())]);
   const rows = [
-    ...correlations(data(), active, now).map((c) => insight(t("corrWith", { a: habitName(c.a), b: habitName(c.b), withA: percent(c.withA), withoutA: percent(c.withoutA) }))),
-    ...moodLinks(data(), active, now).map((m) => insight(t("moodLink", { habit: habitName(m.habit), done: num(m.done), missed: num(m.missed) }))),
+    ...pairs.map((c) => insight(t("corrWith", { a: habitName(c.a), b: habitName(c.b), withA: percent(c.withA), withoutA: percent(c.withoutA) }))),
+    ...moods.map((m) => insight(t("moodLink", { habit: habitName(m.habit), done: num(m.done), missed: num(m.missed) }))),
   ];
   return lane("purple", t("patterns"), { rows, empty: t("patternsEmpty") });
 }
 
 function yearLane() {
-  const now = today();
-  const thisYear = Number(now.slice(0, 4));
+  const thisYear = Number(today().slice(0, 4));
   const year = ui.year ?? thisYear;
-  const r = yearRecap(data(), habits(), year, now);
+  const r = rememberAll("year", year, () => yearRecap(data(), habits(), year, today()));
   const move = (n) => {
     ui.year = year + n;
     render();
@@ -883,7 +888,7 @@ function statsRow(habit) {
   return itemRow({
     id: habit.id,
     tape: el("span", { class: `tape item-tape${s.current ? " is-done" : ""}`, title: streakText(habit, s), textContent: t(`short_${s.unit}`, { count: s.current }) }),
-    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, [mark(kind), textButton(t("share"), () => shareCard(habit), { small: true })])],
+    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, [mark(kind), textButton(t("share"), () => streakCard(habit), { small: true })])],
     after: [
       el("dl", { class: "stats" }, [
         stat(t(habit.type === "avoid" ? "cleanLabel" : "streakLabel"), units(s.current, s.unit)),
@@ -892,7 +897,7 @@ function statsRow(habit) {
         stat(t("last30"), percent(rateOf(habit, 30))),
         stat(t("last90"), percent(rateOf(habit, 90))),
       ]),
-      pattern(habit),
+      weekdayBars(habit),
       heatmap(habit),
     ],
   });
@@ -919,7 +924,7 @@ function progressView() {
     }),
     active.length ? weekLane(active) : null,
     lane("blue", t("stats"), { rows: active.map(statsRow), empty: firstHabitLink() }),
-    active.length ? patternsLane(active) : null,
+    active.length ? linksLane(active) : null,
     habits().length ? yearLane() : null,
   ];
 }
@@ -941,26 +946,26 @@ function addHabit(template) {
 // Unpicking the last day goes back to every day.
 function dayPicker(habit, patch) {
   const chosen = habit.days ?? [];
-  const toggle = (i) => patch({ days: chosen.includes(i) ? chosen.filter((x) => x !== i) : [...chosen, i].sort() });
-  return el("span", { class: "days", role: "group", "aria-label": t("onDays") }, [0, 1, 2, 3, 4, 5, 6].map((i) =>
-    el("button", {
-      type: "button",
-      class: "day",
-      "aria-pressed": String(chosen.includes(i)),
-      "aria-label": weekdayName(i, "long"),
-      "data-focus-key": `${habit.id}:day${i}`,
-      textContent: weekdayName(i, "narrow"),
-      onclick: () => toggle(i),
-    })));
+  return toggleRow(t("onDays"), [0, 1, 2, 3, 4, 5, 6].map((i) => ({
+    on: chosen.includes(i),
+    label: weekdayName(i, "long"),
+    key: `${habit.id}:day${i}`,
+    text: weekdayName(i, "narrow"),
+    pick: () => patch({ days: chosen.includes(i) ? chosen.filter((x) => x !== i) : [...chosen, i].sort() }),
+  })));
 }
 
-const SCHEDULES = { daily: { days: [], every: 0 }, days: { days: [0, 1, 2, 3, 4], every: 0 }, every: { days: [], every: 2 } };
+const SCHEDULES = {
+  daily: () => ({ days: [], every: 0 }),
+  days: () => ({ days: [0, 1, 2, 3, 4], every: 0 }),
+  every: () => ({ days: [], every: 2, everyFrom: today() }),
+};
 
 function scheduleFields(habit, patch) {
   const mode = habit.every > 1 ? "every" : habit.days?.length ? "days" : "daily";
   const select = el(
     "select",
-    { class: "pill-select", "aria-label": t("schedule"), "data-focus-key": `${habit.id}:repeat`, onchange: () => patch(SCHEDULES[select.value]) },
+    { class: "pill-select", "aria-label": t("schedule"), "data-focus-key": `${habit.id}:repeat`, onchange: () => patch(SCHEDULES[select.value]()) },
     Object.keys(SCHEDULES).map((k) => el("option", { value: k, textContent: t(`repeat_${k}`) })),
   );
   select.value = mode;
@@ -980,9 +985,11 @@ function scheduleFields(habit, patch) {
   return [select, el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("everyN") }), every, el("span", { class: "meta-label", textContent: t("daysWord") })])];
 }
 
+const peersOf = (habit) => habits().filter((h) => Boolean(h.archived) === Boolean(habit.archived));
+
 // Swaps a habit with its neighbour in the list it is shown in.
 function moveHabit(habit, step) {
-  const peers = habits().filter((h) => Boolean(h.archived) === Boolean(habit.archived));
+  const peers = peersOf(habit);
   const other = peers[peers.findIndex((h) => h.id === habit.id) + step];
   if (!other) return;
   const ids = data().habits.map((h) => h.id);
@@ -1067,7 +1074,7 @@ function editRow(habit) {
   // `list` is read-only as a property.
   group.setAttribute("list", "groups");
   fields.push(group);
-  const peers = habits().filter((h) => Boolean(h.archived) === Boolean(habit.archived));
+  const peers = peersOf(habit);
   const at = peers.findIndex((h) => h.id === habit.id);
 
   const confirmKey = `habit:${habit.id}`;
@@ -1085,33 +1092,33 @@ function editRow(habit) {
   ]);
 }
 
-function pauseRow(pause) {
+function breakRow(rest) {
   // Moving one end past the other drags the other along.
   const save = (patch) => {
-    const next = { ...pause, ...patch };
+    const next = { ...rest, ...patch };
     if (next.to < next.from) Object.assign(next, patch.from ? { to: next.from } : { from: next.to });
-    store.commit({ t: "pause", pause: next });
+    store.commit({ t: "break", break: next });
   };
   const who = el(
     "select",
-    { class: "pill-select", "aria-label": t("habit"), "data-focus-key": `${pause.id}:who`, onchange: () => save({ habitId: who.value }) },
+    { class: "pill-select", "aria-label": t("habit"), "data-focus-key": `${rest.id}:who`, onchange: () => save({ habitId: who.value }) },
     [el("option", { value: "", textContent: t("allHabits") }), ...habits().filter((h) => h.type !== "avoid").map((h) => el("option", { value: h.id, textContent: habitName(h) }))],
   );
-  who.value = pause.habitId ?? "";
-  const date = (field, label) => {
+  who.value = rest.habitId ?? "";
+  const date = (field, label, name) => {
     const input = el("input", {
       type: "date",
-      value: pause[field],
-      "aria-label": t(label),
-      "data-focus-key": `${pause.id}:${field}`,
+      value: rest[field],
+      "aria-label": t(name),
+      "data-focus-key": `${rest.id}:${field}`,
       onchange: () => input.value && save({ [field]: input.value }),
     });
     return el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t(label) }), input]);
   };
-  return el("article", { class: "item", "data-id": pause.id }, [
+  return el("article", { class: "item", "data-id": rest.id }, [
     el("div", { class: "edit-row" }, [
-      el("div", { class: "item-meta" }, [who, date("from", "breakFrom"), date("to", "breakTo"), pause.from <= today() && today() <= pause.to ? mark(t("onBreak"), "yellow") : null]),
-      el("div", { class: "item-actions" }, [iconButton("x", t("removeBreak"), () => store.commit({ t: "delPause", id: pause.id }))]),
+      el("div", { class: "item-meta" }, [who, date("from", "breakFrom", "breakStarts"), date("to", "breakTo", "breakEnds"), rest.from <= today() && today() <= rest.to ? mark(t("onBreak"), "yellow") : null]),
+      el("div", { class: "item-actions" }, [iconButton("x", t("removeBreak"), () => store.commit({ t: "delBreak", id: rest.id }))]),
     ]),
   ]);
 }
@@ -1136,8 +1143,8 @@ function templatePicker() {
 function habitsView() {
   const current = habits().filter((h) => !h.archived);
   const archived = habits().filter((h) => h.archived);
-  const pauses = [...(data().pauses ?? [])].sort((a, b) => (a.from < b.from ? 1 : a.from > b.from ? -1 : 0));
-  const addBreak = () => store.commit({ t: "pause", pause: { id: uid(), from: today(), to: addDays(today(), 6), habitId: "" } });
+  const breaks = [...(data().breaks ?? [])].sort((a, b) => (a.from < b.from ? 1 : a.from > b.from ? -1 : 0));
+  const addBreak = () => store.commit({ t: "break", break: { id: uid(), from: today(), to: addDays(today(), 6), habitId: "" } });
   return [
     el("datalist", { id: "groups" }, [...new Set(habits().map(groupOf).filter(Boolean))].map((name) => el("option", { value: name }))),
     lane("yellow", t("habits"), {
@@ -1146,7 +1153,7 @@ function habitsView() {
       rows: current.map(editRow),
       empty: t("habitsEmpty"),
     }),
-    habits().length ? lane("blue", t("breaks"), { tools: [textButton(t("addBreak"), addBreak, { plus: true })], rows: pauses.map(pauseRow), empty: t("breaksEmpty") }) : null,
+    habits().length ? lane("blue", t("breaks"), { tools: [textButton(t("addBreak"), addBreak, { plus: true })], rows: breaks.map(breakRow), empty: t("breaksEmpty") }) : null,
     archived.length ? lane("muted", t("archived"), { count: t("habits", { count: archived.length }), rows: archived.map(editRow) }) : null,
   ];
 }
@@ -1208,7 +1215,7 @@ function showStatus(state, err = null) {
   ui.status = { state, err };
   if (state === "synced") ui.syncedAt = new Date();
   paintStatus();
-  if (state === "synced") refreshPublished().catch(() => {});
+  if (state === "synced") refreshPublished();
 }
 
 // The server no longer knows this session; the device keeps its data until Sign out.
@@ -1217,8 +1224,12 @@ function endSession() {
   paintSettings();
 }
 
+// The service worker words reminders, and cannot read localStorage.
+const tellWorker = (lang) => globalThis.caches?.open("habit-tracker-settings").then((cache) => cache.put("lang", new Response(lang))).catch(() => {});
+
 function changeLanguage(lang) {
   write(local, LANG_KEY, setLanguage(lang));
+  tellWorker(lang);
   formatters.clear();
   applyTranslations();
   paintSettings();
@@ -1232,15 +1243,20 @@ function exportData() {
 
 async function importData(file) {
   const result = $("#importResult");
-  try {
-    const incoming = importFile(file.name, await file.text(), data(), { uid, today: today() });
-    const known = new Set(data().habits.map((h) => h.id));
-    store.commit({ t: "import", data: incoming });
-    result.textContent = t("imported", { count: incoming.habits.filter((h) => !known.has(h.id)).length, days: Object.keys(incoming.log).length });
-  } catch {
-    result.textContent = t("errImport");
-  }
   result.hidden = false;
+  let incoming;
+  try {
+    incoming = importFile(file.name, await file.text(), data(), { uid, today: today() });
+  } catch (err) {
+    result.textContent = err.code === "errImport" ? t("errImport") : describe(err);
+    return;
+  }
+  const known = new Set(data().habits.map((h) => h.id));
+  store.commit({ t: "import", data: incoming });
+  // Synced, or folded into the device copy, right away: the edit holds the whole file until then.
+  store.sync();
+  const habitsAdded = t("importedHabits", { count: incoming.habits.filter((h) => !known.has(h.id)).length });
+  result.textContent = `${habitsAdded} ${t("importedDays", { count: Object.keys(incoming.log).length })}`;
 }
 
 let googleReady = null;
@@ -1267,12 +1283,11 @@ async function renderGoogleButton() {
 }
 
 // Display only: the server checks the token itself.
-function credentialProfile(credential) {
-  const payload = JSON.parse(new TextDecoder().decode(fromB64(credential.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))));
-  return { sub: payload.sub, email: payload.email ?? "" };
-}
+const emailOf = (credential) => JSON.parse(new TextDecoder().decode(fromB64url(credential.split(".")[1]))).email ?? "";
 
-function startAccount({ token, sub, email }) {
+// However it is opened, an account is known on the device by the server's ID for it.
+function startAccount({ token, userId, email }) {
+  const sub = `id:${userId}`;
   // Another person's passphrase must not seal this account's data.
   if (settings.sub && settings.sub !== sub) {
     saveSecret(PASS_KEY, "");
@@ -1282,6 +1297,7 @@ function startAccount({ token, sub, email }) {
   saveSettings();
   saveSecret(SESSION_KEY, token);
   saveSecret(EMAIL_KEY, email);
+  ui.links = null;
   paintSettings();
   if (!secret(PASS_KEY)) $("#passphrase").focus();
   store.sync();
@@ -1289,97 +1305,110 @@ function startAccount({ token, sub, email }) {
 
 async function onCredential({ credential }) {
   try {
-    const { token } = await signIn(credential);
-    startAccount({ token, ...credentialProfile(credential) });
+    startAccount({ ...(await signIn(credential)), email: emailOf(credential) });
   } catch (err) {
     showStatus("error", { code: "errSignIn", message: describe(err) });
   }
 }
 
-// An account opened with a passkey is known by the server's own ID for it.
+// Closing the browser's passkey sheet is not an error.
+const dismissed = (err) => err.name === "NotAllowedError" || err.name === "AbortError";
+
 async function passkeyAccount(ceremony) {
   try {
-    const { token, userId } = await ceremony();
-    startAccount({ token, sub: `id:${userId}`, email: "" });
+    startAccount({ ...(await ceremony()), email: "" });
   } catch (err) {
-    // Closing the browser's passkey sheet is not an error.
-    if (err.name !== "NotAllowedError" && err.name !== "AbortError") showStatus("error", { code: "errSignIn", message: describe(err) });
+    if (!dismissed(err)) showStatus("error", { code: "errSignIn", message: describe(err) });
   }
 }
 
 const inAccount = () => settings.mode === "account" && Boolean(secret(SESSION_KEY));
-const shareUrl = () => `${new URL("share.html", location.href).href}#${settings.share.token}.${settings.share.key}`;
+const sharing = () => data().share ?? null;
+const shareUrl = () => `${new URL("share.html", location.href).href}#${ui.links.share}.${sharing().key}`;
 const reminderMinutes = () => utcMinutes([...new Set(activeHabits().map((h) => h.time).filter(Boolean))]);
-// The time the file was made changes on every build and is not a change worth publishing.
-const feedBody = () => toIcs(data());
-const feedKey = (body) => body.replace(/DTSTAMP:.*/g, "");
-const shareBody = () => JSON.stringify(buildShare(data(), activeHabits().filter((h) => settings.share.ids.includes(h.id)), today(), settings.share.name ?? ""));
+const feedBody = () => new TextEncoder().encode(toIcs(data()));
 
-async function publishFeed() {
-  const body = feedBody();
-  settings.feed = (await publishLink("feed", secret(SESSION_KEY), new TextEncoder().encode(body))).token;
-  ui.published.feed = feedKey(body);
+function shareBody() {
+  const { key, ids, name } = sharing();
+  const shown = activeHabits().filter((h) => ids.includes(h.id));
+  return sealWithKey(JSON.stringify(sharedProgress(data(), shown, today(), name ?? "", (h) => rateOf(h, 30))), key);
 }
 
-async function publishShare() {
-  const body = shareBody();
-  settings.share.token = (await publishLink("share", secret(SESSION_KEY), await wrap(body, settings.share.key))).token;
-  ui.published.share = body;
+// A link is brought up to date only while it is still published: a 404 means another device took it down.
+async function refreshLink(kind, body) {
+  try {
+    await updateLink(kind, secret(SESSION_KEY), await body());
+  } catch (err) {
+    if (err.status !== 404) throw err;
+    delete ui.links[kind];
+  }
 }
 
-async function sendReminders() {
-  const minutes = reminderMinutes();
-  await syncReminders(secret(SESSION_KEY), minutes, true);
-  ui.published.remind = minutes.join();
-}
-
-// After a sync, whatever is published is brought up to date if it changed.
+// After a sync that changed something, or on a new day, what is published follows the data.
 async function refreshPublished() {
   if (!inAccount()) return;
-  if (settings.feed && ui.published.feed !== feedKey(feedBody())) await publishFeed();
-  if (settings.share && ui.published.share !== shareBody()) await publishShare();
-  if (settings.remind && canRemind() && ui.published.remind !== reminderMinutes().join()) await sendReminders();
-  saveSettings();
+  const stamp = `${store.version()}:${today()}`;
+  if (ui.publishedAt === stamp) return;
+  try {
+    ui.links ??= await publishedLinks(secret(SESSION_KEY));
+    const steps = [
+      ui.links.feed && refreshLink("feed", feedBody),
+      ui.links.share && sharing() && refreshLink("share", shareBody),
+      settings.remind && canRemind() && setDeviceReminders(secret(SESSION_KEY), reminderMinutes()),
+    ];
+    const failed = (await Promise.allSettled(steps)).find((step) => step.status === "rejected");
+    if (failed) throw failed.reason;
+    ui.publishedAt = stamp;
+  } catch (err) {
+    ui.accountNote = describe(err);
+  }
+  if (!$("#settings").hidden) paintAccountOptions();
 }
 
-// Runs one of the account extras, then repaints with what it said or how it failed.
-async function extra(action) {
-  ui.extraNote = "";
+// Runs something from the account options, then repaints with what it said or how it failed.
+async function accountAction(action) {
+  ui.accountNote = "";
   try {
-    ui.extraNote = (await action()) ?? "";
+    ui.accountNote = (await action()) ?? "";
   } catch (err) {
-    if (err.name !== "NotAllowedError" && err.name !== "AbortError") ui.extraNote = err.name === "OperationError" ? t("errRecovery") : describe(err);
+    if (!dismissed(err)) ui.accountNote = err.name === "OperationError" ? t("errRecovery") : describe(err);
   }
   saveSettings();
   paintSettings();
 }
 
-const EXTRAS = {
+async function setShare(share) {
+  store.commit({ t: "share", share });
+  ui.links.share = (await publishLink("share", secret(SESSION_KEY), await shareBody())).token;
+}
+
+const PUBLISHING = {
   feed: async (on) => {
-    if (on) return void (await publishFeed());
-    await removeLink("feed", secret(SESSION_KEY));
-    settings.feed = "";
+    if (on) ui.links.feed = (await publishLink("feed", secret(SESSION_KEY), feedBody())).token;
+    else {
+      await removeLink("feed", secret(SESSION_KEY));
+      delete ui.links.feed;
+    }
   },
   share: async (on) => {
-    if (on) {
-      settings.share = { key: randomKey(), ids: activeHabits().map((h) => h.id), token: "" };
-      return void (await publishShare());
-    }
+    if (on) return setShare(sharing() ?? { key: newKey(), ids: activeHabits().map((h) => h.id), name: "" });
     await removeLink("share", secret(SESSION_KEY));
-    settings.share = null;
+    delete ui.links.share;
+    store.commit({ t: "share", share: null });
   },
   remind: async (on) => {
-    if (on) await sendReminders();
-    else await syncReminders(secret(SESSION_KEY), [], false);
+    if (on) await setDeviceReminders(secret(SESSION_KEY), reminderMinutes());
+    else await stopDeviceReminders(secret(SESSION_KEY));
     settings.remind = on;
   },
 };
 
+// Only a passphrase that has just opened the data is worth a key: a mistyped one would replace the good key.
 async function makeRecovery() {
-  const passphrase = secret(PASS_KEY);
-  if (passphrase.length < 8) return t("errWeakPassphrase");
+  await store.sync();
+  if (ui.status.state !== "synced") return t("recoveryNeedsSync");
   const code = newRecoveryCode();
-  await saveRecovery(secret(SESSION_KEY), await wrap(passphrase, code));
+  await saveRecovery(secret(SESSION_KEY), await wrap(secret(PASS_KEY), code));
   return t("recoveryMade", { code: formatCode(code) });
 }
 
@@ -1399,59 +1428,70 @@ async function useRecovery(code) {
   return t("recovered");
 }
 
-function paintExtras() {
-  const on = inAccount();
-  $("#passkeyButtons").hidden = on || settings.mode !== "account" || !window.PublicKeyCredential;
+async function dropPasskeys() {
+  const { count } = await passkeyCount(secret(SESSION_KEY));
+  if (!count) return t("noPasskeys");
+  await removePasskeys(secret(SESSION_KEY));
+  return t("passkeysRemoved", { count });
+}
+
+function paintPasskeyButtons() {
+  $("#passkeyButtons").hidden = inAccount() || settings.mode !== "account" || !window.PublicKeyCredential;
   $("#passkeyButtons").replaceChildren(
     textButton(t("passkeySignIn"), () => passkeyAccount(usePasskey), { small: true }),
     textButton(t("passkeyNew"), () => passkeyAccount(() => createPasskey()), { small: true }),
   );
+}
 
+function paintAccountOptions() {
+  const box = $("#accountOptions");
+  if (!inAccount()) return box.replaceChildren();
+  if (!ui.links) {
+    publishedLinks(secret(SESSION_KEY)).then((links) => {
+      ui.links = links;
+      paintAccountOptions();
+    }, () => {});
+    return box.replaceChildren();
+  }
   const toggle = (label, checked, onchange) => el("label", { class: "check" }, [el("input", { type: "checkbox", checked, onchange }), el("span", { textContent: label })]);
   const address = (url) => el("input", { readOnly: true, value: url, "aria-label": t("linkAddress"), onfocus: (e) => e.target.select() });
   const hint = (text) => el("p", { class: "hint", textContent: text });
-  const rows = [];
-  if (on) {
-    rows.push(el("div", { class: "row" }, [
-      window.PublicKeyCredential ? textButton(t("addPasskey"), () => extra(async () => (await createPasskey(secret(SESSION_KEY))) && t("passkeyAdded")), { small: true }) : null,
-      textButton(t("newRecovery"), () => extra(makeRecovery), { small: true }),
-      // Only an account with another way in can drop its passkeys.
-      secret(EMAIL_KEY) ? textButton(t("removePasskeys"), () => extra(async () => {
-        const { count } = await passkeyCount(secret(SESSION_KEY));
-        if (count) await removePasskeys(secret(SESSION_KEY));
-        return t("passkeysRemoved", { count });
-      }), { small: true }) : null,
-    ]));
-    rows.push(toggle(t("feedToggle"), Boolean(settings.feed), (e) => extra(() => EXTRAS.feed(e.target.checked))));
-    if (settings.feed) rows.push(address(feedUrl(settings.feed)), hint(t("feedHint")));
-    rows.push(toggle(t("shareToggle"), Boolean(settings.share), (e) => extra(() => EXTRAS.share(e.target.checked))));
-    if (settings.share?.token) {
-      const pick = (id, shared) => extra(async () => {
-        settings.share.ids = shared ? [...settings.share.ids, id] : settings.share.ids.filter((x) => x !== id);
-        await publishShare();
-      });
-      const name = el("input", {
-        value: settings.share.name ?? "",
-        maxLength: 60,
-        placeholder: t("shareName"),
-        "aria-label": t("shareName"),
-        onchange: () => extra(async () => {
-          settings.share.name = name.value.trim();
-          await publishShare();
-        }),
-      });
-      rows.push(address(shareUrl()), hint(t("shareHint")), name, el("div", { class: "row" }, activeHabits().map((h) => toggle(habitName(h), settings.share.ids.includes(h.id), (e) => pick(h.id, e.target.checked)))));
-    }
-    if (canRemind()) rows.push(toggle(t("remindToggle"), Boolean(settings.remind), (e) => extra(() => EXTRAS.remind(e.target.checked))), hint(t("remindHint")));
-    if (ui.extraNote) rows.push(el("p", { class: "hint", role: "status", textContent: ui.extraNote }));
+  const publish = (kind) => (e) => accountAction(() => PUBLISHING[kind](e.target.checked));
+  // Only Google sign-in sets an email, and only an account with it has another way in.
+  const hasGoogle = Boolean(secret(EMAIL_KEY));
+  const share = ui.links.share && sharing();
+  const rows = [
+    el("div", { class: "row" }, [
+      window.PublicKeyCredential ? textButton(t("addPasskey"), () => accountAction(async () => (await createPasskey(secret(SESSION_KEY))) && t("passkeyAdded")), { small: true }) : null,
+      hasGoogle ? textButton(t("removePasskeys"), () => accountAction(dropPasskeys), { small: true }) : null,
+      textButton(t("newRecovery"), () => accountAction(makeRecovery), { small: true }),
+    ]),
+    toggle(t("feedToggle"), Boolean(ui.links.feed), publish("feed")),
+    ...(ui.links.feed ? [address(feedUrl(ui.links.feed)), hint(t("feedHint"))] : []),
+    toggle(t("shareToggle"), Boolean(share), publish("share")),
+  ];
+  if (share) {
+    const name = el("input", {
+      value: share.name ?? "",
+      maxLength: 60,
+      placeholder: t("shareName"),
+      "aria-label": t("shareName"),
+      onchange: () => accountAction(() => setShare({ ...share, name: name.value.trim() })),
+    });
+    const pick = (id, shown) => accountAction(() => setShare({ ...share, ids: shown ? [...share.ids, id] : share.ids.filter((x) => x !== id) }));
+    rows.push(address(shareUrl()), hint(t("shareHint")), name, el("div", { class: "row" }, activeHabits().map((h) => toggle(habitName(h), share.ids.includes(h.id), (e) => pick(h.id, e.target.checked)))));
   }
-  $("#accountExtras").replaceChildren(...rows);
+  if (canRemind()) rows.push(toggle(t("remindToggle"), Boolean(settings.remind), publish("remind")), hint(t("remindHint")));
+  if (ui.accountNote) rows.push(el("p", { class: "hint", role: "status", textContent: ui.accountNote }));
+  box.replaceChildren(...rows);
+}
 
+function paintRecovery() {
   const code = el("input", { placeholder: t("recoveryCode"), "aria-label": t("recoveryCode"), autocomplete: "off", spellcheck: false });
-  $("#recoveryBox").hidden = !on;
+  $("#recoveryBox").hidden = !inAccount();
   $("#recoveryBox").replaceChildren(
     ...(ui.recovering
-      ? [code, el("button", { type: "button", class: "btn", textContent: t("recover"), onclick: () => extra(() => useRecovery(code.value)) })]
+      ? [code, el("button", { type: "button", class: "btn", textContent: t("recover"), onclick: () => accountAction(() => useRecovery(code.value)) })]
       : [textButton(t("forgot"), () => {
         ui.recovering = true;
         paintSettings();
@@ -1465,6 +1505,8 @@ async function signOutAccount() {
     if (store.hasPending()) return setConfirm("signOut", paintSettings);
   }
   const token = secret(SESSION_KEY);
+  // Reminders belong to this browser, so they stop with the session.
+  if (token && settings.remind && canRemind()) await stopDeviceReminders(token).catch(() => {});
   clearDevice();
   if (token) signOut(token).catch(() => {});
 }
@@ -1475,10 +1517,8 @@ function clearDevice() {
   store.reset();
   for (const key of [SESSION_KEY, PASS_KEY, EMAIL_KEY]) saveSecret(key, "");
   $("#passphrase").value = "";
-  // Links stay published until turned off; this device only forgets them.
-  Object.assign(settings, { feed: "", share: null, remind: false });
-  ui.published = {};
-  ui.extraNote = "";
+  Object.assign(ui, { links: null, publishedAt: null, accountNote: "" });
+  settings.remind = false;
   settings.sub = "";
   saveSettings();
   paintSettings();
@@ -1498,7 +1538,9 @@ function paintSettings() {
   const mode = settings.mode;
   const signedIn = Boolean(secret(SESSION_KEY));
   const email = secret(EMAIL_KEY);
-  paintExtras();
+  paintPasskeyButtons();
+  paintAccountOptions();
+  paintRecovery();
   $("#syncMode").value = mode;
   $("#noneHint").hidden = mode !== "none";
   $("#accountBlock").hidden = mode !== "account";
@@ -1595,6 +1637,7 @@ function initInstall() {
 
 const lang = setLanguage(read(local, LANG_KEY) || (navigator.language?.startsWith("es") ? "es" : "en"));
 $("#language").value = lang;
+tellWorker(lang);
 $("#language").addEventListener("change", (e) => changeLanguage(e.target.value));
 applyTranslations();
 initSettings();
@@ -1612,6 +1655,12 @@ document.addEventListener("visibilitychange", () => {
   ui.lastSeenDay = today();
   render();
   store.refresh();
+});
+// A timer started or stopped in another tab.
+window.addEventListener("storage", (e) => {
+  if (e.key !== TIMER_KEY) return;
+  ui.timer = loadTimer();
+  render();
 });
 setInterval(() => {
   const node = ui.timer && document.querySelector("[data-timer]");

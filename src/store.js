@@ -1,7 +1,7 @@
 import { emptyData, normalize, replay, queue, applyOp, merge, hasData } from "./lib.js";
 import { deriveKey, seal, unseal, readEnvelope, newSalt, packJson, unpackJson, toB64, fromB64, ITERATIONS } from "./crypto.js";
 import * as idb from "./idb.js";
-import * as account from "./server.js";
+import { readFile, writeFile } from "./server.js";
 import { local, read, write } from "./storage.js";
 
 const COPY_KEY = "synced";
@@ -20,10 +20,9 @@ const MAX_DETACHED_EDITS = 2_000;
 const MIN_PASSPHRASE = 8;
 // Copies saved before targets were recorded came from somewhere unknown, so they are never merged into a target.
 const UNKNOWN_TARGET = "unknown";
-const BACKENDS = { account };
 
 // `target` is where `base`, `version` and `bytes` came from; null means data that never synced.
-// `owner` is the account the data belongs to; it survives switching to a repository or to no sync.
+// `owner` is the account the data belongs to; it survives switching to no sync.
 const emptyCopy = () => ({ target: null, owner: null, merging: false, version: null, bytes: null, base: emptyData() });
 
 function parse(text) {
@@ -69,7 +68,6 @@ async function loadCopy() {
   return null;
 }
 
-
 // The local copy is the last synced file plus the edits not yet pushed. Every sync replays those edits on
 // top of the newest file, so changes made on another device are kept.
 export function createStore({ config, onChange, onStatus }) {
@@ -89,9 +87,12 @@ export function createStore({ config, onChange, onStatus }) {
   let checkedAt = 0;
   let stale = false;
 
+  let edits = 0;
+
   function setView(next) {
     view = next;
     generation++;
+    edits++;
     touched.clear();
   }
 
@@ -222,15 +223,14 @@ export function createStore({ config, onChange, onStatus }) {
 
   async function syncPass() {
     const cfg = config();
-    const backend = BACKENDS[cfg.mode];
-    if (!backend || !cfg.ready) return idle(cfg);
+    if (cfg.mode !== "account" || !cfg.ready) return idle(cfg);
     const start = resets;
     report("syncing");
     if (cache.target !== cfg.target) switchTarget(cfg);
     try {
       const held = cache.bytes ? { version: cache.version, bytes: cache.bytes } : null;
       // Edits on top of a copy already held go straight to the write; a conflict hands back the newer data.
-      let remote = backend.writesBlind && held && cache.pending.length ? held : await backend.readFile(cfg, held);
+      let remote = held && cache.pending.length ? held : await readFile(cfg, held);
       if (held && remote === held && !cache.pending.length && !cache.merging) return synced();
       for (let attempt = 0; ; attempt++) {
         if (start !== resets) return;
@@ -250,7 +250,7 @@ export function createStore({ config, onChange, onStatus }) {
           bytes = await seal(next, key, salt, iterations);
           if (start !== resets) return;
           try {
-            version = await backend.writeFile(cfg, bytes, version);
+            version = await writeFile(cfg, bytes, version);
           } catch (err) {
             if (!err.conflict || attempt >= 4) throw err;
             // The refusal carries the newer file.
@@ -279,21 +279,25 @@ export function createStore({ config, onChange, onStatus }) {
 
   function touch(op) {
     // Breaks and imports can change any habit's stats.
-    if (op.t === "pause" || op.t === "delPause" || op.t === "import") generation++;
+    if (op.t === "break" || op.t === "delBreak" || op.t === "import") generation++;
     const id = op.t === "log" || op.t === "skip" || op.t === "delHabit" ? op.id : op.habit?.id;
     if (id) touched.set(id, (touched.get(id) ?? 0) + 1);
   }
 
   return {
     data: () => view,
+    // Changes whenever the data may have.
+    version: () => edits,
     // Changes whenever anything that habit's stats read may have changed.
     revision: (habitId) => `${generation}:${touched.get(habitId) ?? 0}`,
     // `quiet` skips the re-render, for fields still being typed in.
     commit(op, { quiet = false } = {}) {
       cache.pending = queue(cache.pending, op);
       view = applyOp(view, op);
+      edits++;
       touch(op);
-      savePending();
+      // An edit list too big for the browser to keep would be lost on the next reload.
+      if (!savePending() && local) onStatus("error", { code: "errStorage" });
       if (!quiet) onChange();
       if (state !== "error" && state !== "syncing") report("local");
       clearTimeout(timer);

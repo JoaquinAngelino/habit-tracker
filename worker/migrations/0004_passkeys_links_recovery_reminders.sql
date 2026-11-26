@@ -4,12 +4,25 @@ CREATE TABLE passkeys (
   credential_id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   public_key BLOB NOT NULL,
+  sign_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
+
+CREATE INDEX passkeys_user ON passkeys (user_id);
 
 CREATE TABLE challenges (
   value TEXT PRIMARY KEY,
   expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX challenges_expires_at ON challenges (expires_at);
+
+-- Requests per address and route in each time slot, for the routes anyone can call.
+CREATE TABLE rate_limits (
+  key TEXT NOT NULL,
+  slot INTEGER NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY (key, slot)
 );
 
 -- What an account publishes at an unguessable address: a calendar feed in plain text, or a progress page
@@ -39,6 +52,7 @@ CREATE TABLE reminders (
 );
 
 CREATE INDEX reminders_minute ON reminders (minute);
+CREATE INDEX reminders_user ON reminders (user_id);
 
 -- When each session began, so adding a way in can be limited to someone who has just signed in.
 -- Sessions from before this are treated as old.

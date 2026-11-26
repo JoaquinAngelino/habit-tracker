@@ -241,9 +241,10 @@ function der(raw) {
   return new Uint8Array([0x30, body.length, ...body]);
 }
 
-async function assertion(passkey, { origin = ORIGIN, flags = 1, value } = {}) {
+// Flags 5: a person was present and verified. Passkeys that sync report a use count of 0.
+async function assertion(passkey, { origin = ORIGIN, flags = 5, count = 0, value } = {}) {
   const clientDataJSON = clientJson("webauthn.get", value ?? (await challenge()), origin);
-  const authenticatorData = new Uint8Array([...(await HOST_HASH(origin)), flags, 0, 0, 0, 1]);
+  const authenticatorData = new Uint8Array([...(await HOST_HASH(origin)), flags, 0, 0, 0, count]);
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", Buffer.from(clientDataJSON, "base64url")));
   const raw = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, passkey.pair.privateKey, new Uint8Array([...authenticatorData, ...hash])));
   return { credentialId: passkey.id, authenticatorData: b64url(authenticatorData), clientDataJSON, signature: b64url(der(raw)) };
@@ -273,6 +274,9 @@ test("a passkey added while signed in opens that same account", async () => {
   // Adding a way in ends the account's other sessions.
   assert.equal((await get(elsewhere)).status, 401);
   const back = await call("POST", "/passkey/session", { body: await assertion(passkey) });
+  // Both ways in name the account the same, so a device does not take it for someone else's.
+  const google = await call("POST", "/session", { body: { credential: await idToken() } });
+  assert.equal(back.body.userId, google.body.userId);
   assert.equal((await get(back.body.token)).data, "google data");
   assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM users").get().n, 1);
   assert.equal((await call("GET", "/passkeys", { token: back.body.token })).body.count, 1);
@@ -301,6 +305,7 @@ test("passkey sign-in refuses a reused challenge, another site, a missing person
   assert.equal((await call("POST", "/passkey/session", { body: once })).status, 401);
   assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { origin: "https://evil.example" }) })).status, 401);
   assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { flags: 0 }) })).status, 401);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { flags: 1 }) })).status, 401);
   assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { value: "made-up" }) })).status, 401);
   const other = await newPasskey();
   assert.equal((await call("POST", "/passkey/session", { body: await assertion({ ...passkey, pair: other.pair }) })).status, 401);
@@ -313,19 +318,24 @@ test("passkey sign-in refuses a reused challenge, another site, a missing person
 
 test("a published link is readable by anyone with its address, keeps the address when republished, and can be taken down", async () => {
   const token = await signIn();
-  assert.equal((await call("PUT", "/link/feed", { bytes: enc("x") })).status, 401);
-  const first = await call("PUT", "/link/feed", { token, bytes: enc("BEGIN:VCALENDAR") });
+  assert.equal((await call("POST", "/link/feed", { bytes: enc("x") })).status, 401);
+  assert.equal((await call("PUT", "/link/feed", { token, bytes: enc("x") })).status, 404);
+  const first = await call("POST", "/link/feed", { token, bytes: enc("BEGIN:VCALENDAR") });
   assert.match(first.body.token, /^[\w-]{32}$/);
   const read = await worker.fetch(new Request(`https://api.test/feed/${first.body.token}.ics`), env);
   assert.deepEqual([read.status, read.headers.get("Content-Type"), await read.text()], [200, "text/calendar; charset=utf-8", "BEGIN:VCALENDAR"]);
   assert.equal((await call("PUT", "/link/feed", { token, bytes: enc("again") })).body.token, first.body.token);
-  const share = await call("PUT", "/link/share", { token, bytes: enc("sealed") });
+  const share = await call("POST", "/link/share", { token, bytes: enc("sealed") });
   assert.notEqual(share.body.token, first.body.token);
+  assert.deepEqual((await call("GET", "/links", { token })).body, { feed: first.body.token, share: share.body.token });
   assert.equal((await call("GET", `/share/${share.body.token}`)).data, "sealed");
   assert.equal((await call("GET", `/share/${first.body.token}`)).status, 404);
   assert.equal((await call("PUT", "/link/share", { token, bytes: new Uint8Array(300_001) })).status, 413);
   assert.equal((await call("DELETE", "/link/feed", { token })).status, 204);
   assert.equal((await call("GET", `/feed/${first.body.token}.ics`)).status, 404);
+  // Another device bringing its copy up to date does not publish it again.
+  assert.equal((await call("PUT", "/link/feed", { token, bytes: enc("stale device") })).status, 404);
+  assert.deepEqual((await call("GET", "/links", { token })).body, { share: share.body.token });
 });
 
 test("the recovery blob is kept per account and goes with it", async () => {
@@ -335,9 +345,13 @@ test("the recovery blob is kept per account and goes with it", async () => {
   assert.equal((await call("PUT", "/recovery", { token, bytes: enc("wrapped again") })).status, 204);
   assert.equal((await call("GET", "/recovery", { token })).data, "wrapped again");
   assert.equal((await call("GET", "/recovery", { token: await signIn({ sub: "someone-else" }) })).status, 404);
-  await call("PUT", "/link/feed", { token, bytes: enc("x") });
+  await call("POST", "/link/feed", { token, bytes: enc("x") });
+  await register(await newPasskey(), token);
+  await call("PUT", "/reminders", { token, body: { endpoint: "https://fcm.googleapis.com/fcm/send/a", minutes: [1] } });
   assert.equal((await call("DELETE", "/account", { token })).status, 204);
-  assert.deepEqual([env.DB.sql.prepare("SELECT COUNT(*) AS n FROM recovery").get().n, env.DB.sql.prepare("SELECT COUNT(*) AS n FROM links").get().n], [0, 0]);
+  for (const table of ["recovery", "links", "passkeys", "reminders"]) {
+    assert.equal(env.DB.sql.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0, table);
+  }
 });
 
 test("reminders push, with no body, to the devices due that minute and forget the ones that are gone", async () => {
@@ -383,4 +397,49 @@ test("reminders push, with no body, to the devices due that minute and forget th
   assert.deepEqual(env.DB.sql.prepare("SELECT endpoint, minute FROM reminders ORDER BY minute").all().map((r) => [r.endpoint, r.minute]), [[phone, 450], [phone, 1200]]);
   assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: phone, minutes: [] } })).status, 204);
   assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM reminders").get().n, 0);
+});
+
+test("an account can have reminders on a handful of devices, and a service is signed for once per run", async () => {
+  const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  env.VAPID_PUBLIC_KEY = b64url(new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey)));
+  env.VAPID_PRIVATE_KEY = (await crypto.subtle.exportKey("jwk", keys.privateKey)).d;
+  const token = await signIn();
+  const device = (n) => `https://fcm.googleapis.com/fcm/send/${n}`;
+  for (let n = 0; n < 5; n++) assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: device(n), minutes: [60] } })).status, 204);
+  assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: device(5), minutes: [60] } })).status, 400);
+  assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: device(0), minutes: [61] } })).status, 204);
+
+  const headers = [];
+  const googleFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    headers.push(init.headers.Authorization);
+    return new Response(null, { status: 201 });
+  };
+  const waits = [];
+  try {
+    worker.scheduled({ scheduledTime: Date.parse("2026-11-24T01:00:00Z") }, env, { waitUntil: (p) => waits.push(p) });
+    await Promise.all(waits);
+  } finally {
+    globalThis.fetch = googleFetch;
+  }
+  assert.equal(headers.length, 4);
+  assert.equal(new Set(headers).size, 1);
+});
+
+test("the open passkey routes are limited per address", async () => {
+  const from = (ip) => ({ headers: { "CF-Connecting-IP": ip } });
+  for (let n = 0; n < 30; n++) assert.equal((await call("POST", "/passkey/challenge", from("1.1.1.1"))).status, 200);
+  assert.equal((await call("POST", "/passkey/challenge", from("1.1.1.1"))).status, 429);
+  assert.equal((await call("POST", "/passkey/challenge", from("2.2.2.2"))).status, 200);
+  for (let n = 0; n < 5; n++) await call("POST", "/passkey/register", { ...from("3.3.3.3"), body: {} });
+  assert.equal((await call("POST", "/passkey/register", { ...from("3.3.3.3"), body: {} })).status, 429);
+});
+
+test("a passkey whose use count does not move forward is refused", async () => {
+  const passkey = await newPasskey();
+  await register(passkey);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { count: 7 }) })).status, 200);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { count: 7 }) })).status, 401);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { count: 0 }) })).status, 401);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey, { count: 8 }) })).status, 200);
 });

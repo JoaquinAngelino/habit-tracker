@@ -228,8 +228,17 @@ test("a save refused because the data changed is retried on top of the newer dat
   // B saves between A's last read and A's write.
   b.store.commit({ t: "log", date: "2026-11-23", id: "h", v: 1 });
   await b.store.sync();
+  const real = globalThis.fetch;
+  const puts = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const res = await real(url, init);
+    if (init.method === "PUT") puts.push(res.status);
+    return res;
+  };
   a.store.commit({ t: "log", date: "2026-11-24", id: "h", v: 1 });
   await a.store.sync();
+  globalThis.fetch = real;
+  assert.deepEqual(puts, [409, 204]);
   assert.equal(a.statuses.at(-1), "synced");
   assert.deepEqual(Object.keys(a.store.data().log).sort(), ["2026-11-23", "2026-11-24"]);
   await b.store.sync();

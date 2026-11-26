@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { emptyData, applyOp, replay, merge, normalize, streak, rate, isOff, isDone, level, addMonths, nextDue, queue, hasData } from "../src/lib.js";
-import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap } from "../src/insights.js";
+import { emptyData, applyOp, replay, merge, normalize, streak, rate, isOff, isDone, level, addMonths, nextDue, completeTask, reopenTask, timerMinutes, recentLevels, queue, hasData } from "../src/lib.js";
+import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress, LINK_WEEKS } from "../src/insights.js";
 import { toIcs } from "../src/ics.js";
-import { parseCsv, fromCsv, fromJson } from "../src/importer.js";
+import { parseCsv, fromCsv, fromJson, importFile } from "../src/importer.js";
 
 const TODAY = "2026-11-24"; // a Tuesday
 const daily = { id: "h", name: "Read", type: "check", target: 1, unit: "", start: "2026-11-01" };
@@ -32,33 +32,50 @@ test("a break keeps streaks alive, for one habit or all, and avoid habits count 
   const data = dataWith([daily, weekly, avoid], { "2026-11-09": { h: 1, w: 2 }, "2026-11-23": { h: 1, w: 2 } });
   for (let d = 1; d <= 8; d++) data.log[`2026-11-0${d}`] = { h: 1 };
   assert.equal(streak(data, daily, TODAY).current, 1);
-  applyOp(data, { t: "pause", pause: { id: "p", from: "2026-11-10", to: "2026-11-22", habitId: "" } });
+  applyOp(data, { t: "break", break: { id: "p", from: "2026-11-10", to: "2026-11-22", habitId: "" } });
   assert.equal(streak(data, daily, TODAY).current, 10);
   assert.equal(streak(data, weekly, TODAY).current, 2);
   assert.equal(isOff(data, avoid, "2026-11-15"), false);
   assert.equal(level(data, daily, "2026-11-15", TODAY), "off");
-  applyOp(data, { t: "pause", pause: { id: "p", from: "2026-11-10", to: "2026-11-22", habitId: "w" } });
-  assert.equal(data.pauses.length, 1);
+  applyOp(data, { t: "break", break: { id: "p", from: "2026-11-10", to: "2026-11-22", habitId: "w" } });
+  assert.equal(data.breaks.length, 1);
   assert.equal(streak(data, daily, TODAY).current, 1);
   applyOp(data, { t: "delHabit", id: "w" });
-  assert.deepEqual(data.pauses, []);
+  assert.deepEqual(data.breaks, []);
 });
 
-test("notes and the day's mood are stored per day, merge, and go with their habit", () => {
+test("a note is kept per habit per day, merges, and goes with its habit", () => {
   const data = dataWith(daily);
   applyOp(data, { t: "note", date: TODAY, id: "h", v: "Chapter 3" });
-  applyOp(data, { t: "day", date: TODAY, day: { mood: 4, note: "Good one" } });
   assert.equal(data.notes[TODAY].h, "Chapter 3");
-  assert.equal(hasData({ ...emptyData(), days: data.days }), true);
-  const merged = merge(emptyData(), data);
-  assert.deepEqual(merged.days, { [TODAY]: { mood: 4, note: "Good one" } });
-  assert.deepEqual(merged.notes, { [TODAY]: { h: "Chapter 3" } });
-  applyOp(data, { t: "day", date: TODAY, day: { mood: 0, note: "" } });
-  assert.deepEqual(data.days, {});
+  assert.deepEqual(merge(emptyData(), data).notes, { [TODAY]: { h: "Chapter 3" } });
+  assert.equal(queue([{ t: "note", date: TODAY, id: "h", v: "a" }], { t: "note", date: TODAY, id: "h", v: "ab" }).length, 1);
   applyOp(data, { t: "delHabit", id: "h" });
   assert.deepEqual(data.notes, {});
-  assert.equal(queue([{ t: "note", date: TODAY, id: "h", v: "a" }], { t: "note", date: TODAY, id: "h", v: "ab" }).length, 1);
-  assert.equal(queue([{ t: "day", date: TODAY, day: { mood: 1 } }], { t: "day", date: TODAY, day: { mood: 2 } }).length, 1);
+});
+
+test("the day's mood, energy and note change one at a time, so two devices do not undo each other", () => {
+  const phone = [{ t: "day", date: TODAY, patch: { mood: 4 } }];
+  const laptop = [{ t: "day", date: TODAY, patch: { note: "Good one" } }];
+  const synced = replay(replay(emptyData(), phone), laptop);
+  assert.deepEqual(synced.days, { [TODAY]: { mood: 4, note: "Good one" } });
+  assert.equal(hasData(synced), true);
+
+  const other = emptyData();
+  other.days[TODAY] = { energy: 2 };
+  assert.deepEqual(merge(synced, other).days[TODAY], { mood: 4, note: "Good one", energy: 2 });
+
+  applyOp(synced, { t: "day", date: TODAY, patch: { mood: 0 } });
+  assert.deepEqual(synced.days[TODAY], { note: "Good one" });
+  applyOp(synced, { t: "day", date: TODAY, patch: { note: "" } });
+  assert.deepEqual(synced.days, {});
+});
+
+test("typing a day note queues one edit, and a mood set before it stays queued", () => {
+  let ops = queue([], { t: "day", date: TODAY, patch: { mood: 1 } });
+  ops = queue(ops, { t: "day", date: TODAY, patch: { note: "a" } });
+  ops = queue(ops, { t: "day", date: TODAY, patch: { note: "ab" } });
+  assert.deepEqual(ops.map((op) => op.patch), [{ mood: 1 }, { note: "ab" }]);
 });
 
 test("a timer counts minutes toward its target like an amount", () => {
@@ -83,13 +100,78 @@ test("importing merges into what is there and replays like any edit", () => {
   assert.deepEqual(base.habits.length, 1);
 });
 
+test("importing an older backup changes nothing the data already holds", () => {
+  const backup = dataWith([daily, { ...daily, id: "old", name: "Deleted since" }], { "2026-11-20": { h: 5 } });
+  backup.tasks.push({ id: "t", title: "Pay rent", done: "" });
+  const now = dataWith({ ...daily, name: "Read fiction", archived: true }, { "2026-11-20": { h: 1 } });
+  now.tasks.push({ id: "t", title: "Pay rent", done: TODAY });
+  const out = replay(now, [{ t: "import", data: backup }]);
+  assert.deepEqual(out.habits.map((h) => [h.id, h.name, Boolean(h.archived)]), [["h", "Read fiction", true], ["old", "Deleted since", false]]);
+  assert.deepEqual([out.log["2026-11-20"].h, out.tasks[0].done], [1, TODAY]);
+});
+
 test("repeating tasks come due again after today", () => {
   assert.equal(addMonths("2026-01-31", 1), "2026-02-28");
   assert.equal(addMonths("2026-11-15", 2), "2027-01-15");
-  assert.equal(nextDue("2026-11-24", "daily", TODAY), "2026-11-25");
-  assert.equal(nextDue("2026-11-03", "weekly", TODAY), "2026-12-01");
-  assert.equal(nextDue("2026-11-30", "weekly", TODAY), "2026-12-07");
-  assert.equal(nextDue("", "monthly", TODAY), "2026-12-24");
+  assert.equal(nextDue({ due: "2026-11-24", repeat: "daily" }, TODAY), "2026-11-25");
+  assert.equal(nextDue({ due: "2026-11-03", repeat: "weekly" }, TODAY), "2026-12-01");
+  assert.equal(nextDue({ due: "2026-11-30", repeat: "weekly" }, TODAY), "2026-12-07");
+  assert.equal(nextDue({ due: "", repeat: "monthly" }, TODAY), "2026-12-24");
+});
+
+test("a monthly task due at the end of the month comes back to that day after a shorter month", () => {
+  assert.equal(nextDue({ due: "2026-01-31", repeat: "monthly" }, "2026-03-15"), "2026-03-31");
+  let n = 0;
+  const newId = () => `t${n++}`;
+  let task = { id: "a", title: "Rent", repeat: "monthly", due: "2026-01-31", done: "" };
+  const dues = [];
+  for (const day of ["2026-01-31", "2026-02-28", "2026-03-31"]) {
+    [{ task }] = completeTask(task, day, newId);
+    dues.push(task.due);
+  }
+  assert.deepEqual(dues, ["2026-02-28", "2026-03-31", "2026-04-30"]);
+});
+
+test("finishing a repeating task opens the next one with its steps to do again, and undoing takes it back", () => {
+  let n = 0;
+  const data = emptyData();
+  const task = { id: "a", title: "Water plants", repeat: "weekly", due: TODAY, done: "", steps: [{ id: "s", title: "Fill can", done: true }] };
+  data.tasks.push(task);
+  completeTask(task, TODAY, () => `new${n++}`).forEach((op) => applyOp(data, op));
+  const [done, next] = [data.tasks.find((x) => x.id === "a"), data.tasks.find((x) => x.id !== "a")];
+  assert.deepEqual([done.done, done.repeat, next.due, next.done, next.steps.map((s) => s.done)], [TODAY, "weekly", "2026-12-01", "", [false]]);
+
+  reopenTask(done, data.tasks).forEach((op) => applyOp(data, op));
+  assert.deepEqual(data.tasks.map((x) => [x.id, x.done, x.repeat, x.nextId]), [["a", "", "weekly", undefined]]);
+});
+
+test("undoing leaves the next task alone once it was finished too", () => {
+  const data = emptyData();
+  data.tasks.push({ id: "a", title: "x", repeat: "daily", due: TODAY, done: TODAY, nextId: "b" }, { id: "b", title: "x", repeat: "daily", due: "2026-11-25", done: "2026-11-25" });
+  reopenTask(data.tasks[0], data.tasks).forEach((op) => applyOp(data, op));
+  assert.deepEqual(data.tasks.map((x) => x.id), ["a", "b"]);
+});
+
+test("a task that does not repeat is only marked done", () => {
+  assert.deepEqual(completeTask({ id: "a", title: "x", done: "" }, TODAY, () => "n"), [{ t: "task", task: { id: "a", title: "x", done: TODAY } }]);
+});
+
+test("a timer counts whole minutes, at least one, and stops counting after a day", () => {
+  assert.deepEqual([10_000, 89_000, 91_000, 3 * 86_400_000].map((ms) => timerMinutes(0, ms)), [1, 1, 2, 1440]);
+});
+
+test("every-N days stay where they were when the start date is moved", () => {
+  const habit = { ...daily, start: "2026-11-02", every: 2, everyFrom: "2026-11-02" };
+  const data = dataWith(habit, { "2026-11-20": { h: 1 }, "2026-11-22": { h: 1 } });
+  const before = streak(data, habit, "2026-11-23").current;
+  assert.equal(streak(data, { ...habit, start: "2026-11-05" }, "2026-11-23").current, before);
+  assert.equal(before, 2);
+});
+
+test("recent levels end with this week and leave days to come empty", () => {
+  const data = dataWith(daily, { "2026-11-23": { h: 1 }, [TODAY]: { h: 1 } });
+  const cells = recentLevels(data, daily, TODAY, 2);
+  assert.deepEqual(cells, [0, 0, 0, 0, 0, 0, 0, 4, 4, null, null, null, null, null]);
 });
 
 test("weekday pattern shows which days a habit gets done", () => {
@@ -98,6 +180,22 @@ test("weekday pattern shows which days a habit gets done", () => {
   assert.equal(pattern[0], 1);
   assert.equal(pattern[6], 0);
   assert.equal(pattern[1], 1); // today, a Tuesday, is still open and left out
+});
+
+test("avoid habits are left out of links between habits and with mood", () => {
+  const run = { ...daily, id: "a", name: "Run" };
+  const smoking = { ...daily, id: "s", name: "Smoking", type: "avoid" };
+  const data = dataWith([run, smoking], range(1, 23, (i) => (i % 2 ? { a: 1 } : { s: 1 })));
+  for (let i = 0; i < 23; i++) data.days[`2026-11-${String(1 + i).padStart(2, "0")}`] = { mood: i % 2 ? 4 : 2 };
+  assert.deepEqual(correlations(data, [run, smoking], TODAY), []);
+  assert.deepEqual(moodLinks(data, [run, smoking], TODAY).map((m) => m.habit.id), ["a"]);
+});
+
+test("the year recap counts an every-N streak on the days it was scheduled", () => {
+  const habit = { ...daily, start: "2025-12-31", every: 2 };
+  const data = dataWith(habit, {});
+  for (const date of ["2026-01-02", "2026-01-04", "2026-01-06", "2026-01-08"]) data.log[date] = { h: 1 };
+  assert.equal(yearRecap(data, [habit], 2026, "2026-01-08").streak.count, 4);
 });
 
 test("correlations find habits done on the same days", () => {
@@ -164,9 +262,25 @@ test("CSV import reads a column per habit or a row per entry, and matches habits
   assert.deepEqual(wide.log, { "2026-11-20": { h: 1, new0: 12 }, "2026-11-21": { new0: 30 } });
   const long = fromCsv("date,habit,value\n2026/11/3,Run,yes\n2026-11-04,Run,\n", emptyData(), env);
   assert.deepEqual(long.log, { "2026-11-03": { new1: 1 } });
-  const loop = fromCsv("Date,Read\n2026-11-20,2\n2026-11-21,3\n2026-11-22,1\n", dataWith(daily), env);
-  assert.deepEqual([loop.log, loop.skips, loop.habits], [{ "2026-11-20": { h: 1 } }, { "2026-11-21": { h: 1 } }, []]);
   assert.throws(() => fromCsv("a,b\n1,2\n", emptyData(), env), { code: "errImport" });
+});
+
+test("small counts are counts unless the file is Loop's, whose values are codes", () => {
+  let n = 0;
+  const env = { uid: () => `c${n++}`, today: TODAY };
+  const text = "Date,Coffee\n2026-11-20,2\n2026-11-21,3\n2026-11-22,1\n";
+  const counts = fromCsv(text, emptyData(), env);
+  assert.deepEqual([counts.habits[0].type, counts.log], ["amount", { "2026-11-20": { c0: 2 }, "2026-11-21": { c0: 3 }, "2026-11-22": { c0: 1 } }]);
+  const loop = importFile("Checkmarks.csv", text, emptyData(), env);
+  assert.deepEqual([loop.habits[0].type, loop.log, loop.skips], ["check", { "2026-11-20": { c1: 1 } }, { "2026-11-21": { c1: 1 } }]);
+});
+
+test("CSV import reads semicolon-separated files and makes no habit from a column with nothing logged", () => {
+  let n = 0;
+  const env = { uid: () => `s${n++}`, today: TODAY };
+  const out = fromCsv("Fecha;Leer;Comentario\n2026-11-20;1,5;muy bien\n2026-11-21;1;\n", emptyData(), env);
+  assert.deepEqual(out.habits.map((h) => [h.name, h.type]), [["Leer", "amount"]]);
+  assert.deepEqual(out.log, { "2026-11-20": { s0: 1.5 }, "2026-11-21": { s0: 1 } });
 });
 
 test("JSON import takes a downloaded file and rejects anything else", () => {
@@ -176,21 +290,19 @@ test("JSON import takes a downloaded file and rejects anything else", () => {
   assert.throws(() => fromJson("nope"), { code: "errImport" });
 });
 
-test("a share shows streaks and recent days, and nothing of notes, amounts or tasks", async () => {
-  const { buildShare, SHARED_WEEKS } = await import("../src/extras.js");
+test("a share shows streaks and recent days, and nothing of notes, amounts or tasks", () => {
   const pages = { ...daily, id: "p", type: "amount", target: 10, unit: "pages" };
   const data = dataWith([daily, pages], { "2026-11-23": { h: 1, p: 12 }, [TODAY]: { h: 1 } });
   data.notes[TODAY] = { h: "private" };
   data.tasks.push({ id: "t", title: "private task", done: "" });
-  const shared = buildShare(data, [daily], TODAY);
-  assert.deepEqual(shared.habits.map((h) => [h.name, h.avoid, h.streak.current, h.cells.length]), [["Read", false, 2, SHARED_WEEKS * 7]]);
+  const shared = sharedProgress(data, [daily], TODAY, "Ana", () => 0.5);
+  assert.deepEqual([shared.name, shared.habits.map((h) => [h.name, h.avoid, h.streak.current, h.rate, h.cells.length])], ["Ana", [["Read", false, 2, 0.5, LINK_WEEKS * 7]]]);
   assert.deepEqual(shared.habits[0].cells.slice(-7), [4, 4, null, null, null, null, null]);
   assert.equal(JSON.stringify(shared).includes("private"), false);
 });
 
 test("recovery keys are easy to copy, and a sealed passphrase opens only with its key", async () => {
-  const { newRecoveryCode, cleanCode, formatCode } = await import("../src/extras.js");
-  const { wrap, unwrap } = await import("../src/crypto.js");
+  const { newRecoveryCode, cleanCode, formatCode, wrap, unwrap } = await import("../src/crypto.js");
   const code = newRecoveryCode();
   assert.match(formatCode(code), /^([A-HJKMNP-TV-Z2-9]{4}-){5}[A-HJKMNP-TV-Z2-9]{4}$/);
   assert.equal(cleanCode(` ${formatCode(code).toLowerCase()} `), code);
@@ -200,12 +312,21 @@ test("recovery keys are easy to copy, and a sealed passphrase opens only with it
   await assert.rejects(unwrap(sealed, newRecoveryCode()), { name: "OperationError" });
 });
 
-test("reminder times become minutes of the UTC day", async () => {
-  const { utcMinutes } = await import("../src/extras.js");
-  const now = new Date(2026, 10, 24, 12);
-  const offset = new Date(2026, 10, 24, 7, 30).getTimezoneOffset();
-  assert.deepEqual(utcMinutes(["07:30", "07:30"], now), [(((450 + offset) % 1440) + 1440) % 1440]);
-  assert.equal(utcMinutes(["21:00", "06:15", "23:59"], now).length, 3);
+test("a share link's key opens what it sealed, and no other key does", async () => {
+  const { newKey, sealWithKey, openWithKey } = await import("../src/crypto.js");
+  const key = newKey();
+  const sealed = await sealWithKey("streaks", key);
+  assert.equal(await openWithKey(sealed, key), "streaks");
+  await assert.rejects(openWithKey(sealed, newKey()), { name: "OperationError" });
+});
+
+test("reminder times become minutes of the UTC day", async (t) => {
+  const { utcMinutes } = await import("../src/account.js");
+  const zone = process.env.TZ;
+  t.after(() => (zone === undefined ? delete process.env.TZ : (process.env.TZ = zone)));
+  // Five and a half hours ahead of UTC, so a wrong sign or a dropped half hour shows.
+  process.env.TZ = "Asia/Kolkata";
+  assert.deepEqual(utcMinutes(["07:30", "07:30", "02:00"], new Date(2026, 10, 24, 12)), [120, 1230]);
 });
 
 test("CSV import reads check-in logs and exports that mark each entry completed or skipped", () => {

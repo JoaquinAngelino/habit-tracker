@@ -1,25 +1,28 @@
-import { addDays, weekday, isAmount } from "./lib.js";
+import { addDays, canSchedule, isScheduled } from "./lib.js";
 
 const BYDAY = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 const compact = (iso) => iso.replaceAll("-", "");
 const text = (value) => String(value).replace(/\\/g, "\\\\").replace(/([;,])/g, "\\$1").replace(/\r\n|\r|\n/g, "\\n");
 
-// Data can come from an imported or synced file, so anything written outside SUMMARY is checked first:
-// a stray line break there would add lines of its own to the calendar.
+// Imported or synced data is untrusted: every field written outside SUMMARY is checked first.
 const isDate = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 const timeOf = (value) => (typeof value === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : "");
 const idOf = (value) => String(value).replace(/[^\w-]/g, "");
 const weekdays = (habit) => (Array.isArray(habit.days) ? habit.days.filter((d) => Number.isInteger(d) && d >= 0 && d < 7) : []);
 const interval = (habit) => (Number.isInteger(habit.every) && habit.every > 1 && habit.every < 1000 ? habit.every : 0);
 
-// Lines longer than 75 bytes continue on the next one after a space.
+const MAX_LINE_BYTES = 75;
+const encoder = new TextEncoder();
+
+// Longer lines continue on the next one after a space.
 function fold(line) {
+  if (line.length <= MAX_LINE_BYTES && !/[^\x00-\x7f]/.test(line)) return line;
   const out = [];
   let part = "";
   let size = 0;
   for (const ch of line) {
-    const bytes = new TextEncoder().encode(ch).length;
-    if (size + bytes > 74) {
+    const bytes = encoder.encode(ch).length;
+    if (size + bytes > MAX_LINE_BYTES) {
       out.push(part);
       part = " ";
       size = 1;
@@ -41,11 +44,10 @@ function rule(habit) {
 
 // The first day the rule lands on, which a calendar needs as the event's start.
 function firstDay(habit) {
+  if (!canSchedule(habit)) return habit.start;
+  const checked = { ...habit, days: weekdays(habit), every: interval(habit), everyFrom: isDate(habit.everyFrom) ? habit.everyFrom : habit.start };
   let d = habit.start;
-  const days = weekdays(habit);
-  if ((habit.type === "check" || isAmount(habit)) && !interval(habit) && days.length) {
-    while (!days.includes(weekday(d))) d = addDays(d, 1);
-  }
+  while (!isScheduled(checked, d)) d = addDays(d, 1);
   return d;
 }
 

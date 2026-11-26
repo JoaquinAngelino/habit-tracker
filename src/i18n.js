@@ -44,6 +44,7 @@ export const STRINGS = {
     errServer: "The sync server failed. Try again later.",
     errSignIn: "Sign-in failed: {message}",
     errTooLarge: "Your data is too large for the sync server.",
+    errStorage: "This browser's storage is full, so the last change may not survive closing the app. Sync now.",
     errWeakPassphrase: "Use a passphrase of at least 8 characters.",
 
     type_check: "Daily",
@@ -191,8 +192,10 @@ export const STRINGS = {
 
     importData: "Import data",
     calendarFile: "Download calendar",
-    imported_one: "Imported 1 new habit and {days} days of history.",
-    imported_other: "Imported {count} new habits and {days} days of history.",
+    importedHabits_one: "Imported 1 new habit.",
+    importedHabits_other: "Imported {count} new habits.",
+    importedDays_one: "History added for 1 day.",
+    importedDays_other: "History added for {count} days.",
     errImport: "That file could not be read. Use one from Download my data, or a CSV with a Date column.",
     type_timer: "Timer",
     minutes: "min",
@@ -245,6 +248,8 @@ export const STRINGS = {
     allHabits: "All habits",
     breakFrom: "From",
     breakTo: "to",
+    breakStarts: "Break starts",
+    breakEnds: "Break ends",
     removeBreak: "Remove break",
     share: "Share",
     byWeekday: "Done by day of the week, last 90 days",
@@ -285,6 +290,7 @@ export const STRINGS = {
     passkeyAdded: "Passkey added. It now opens this account, and your other devices were signed out.",
     signedInPasskey: "Signed in with a passkey",
     newRecovery: "Create a recovery key",
+    recoveryNeedsSync: "Sync first: a recovery key is made only once the passphrase has opened your data.",
     recoveryMade: "Recovery key: {code}. Write it down now. It is not shown again, it replaces any earlier one, and it stops working if you change the passphrase.",
     forgot: "Forgot the passphrase?",
     recoveryCode: "Recovery key",
@@ -298,13 +304,14 @@ export const STRINGS = {
     shareToggle: "Share progress with a link",
     shareHint: "Anyone with this link sees the streaks and recent days of the habits ticked below, and nothing else. It is encrypted with a key only the link holds.",
     remindToggle: "Remind me at each habit's time",
-    remindHint: "Sends a notification at the times set on your habits. The server learns the times, not the habits.",
+    remindHint: "Sends a notification every day at the times set on your habits, days off included. The server learns the times, not the habits.",
     errNotify: "Notifications are blocked for this site.",
     sharedTitle: "Shared progress",
     sharedUpdated: "Updated {date}",
     sharedGone: "This link no longer works.",
-    errFreshSignIn: "For that, sign out and in again, then try within 10 minutes.",
+    errFreshSignIn: "That needs a fresh sign-in. Sync, sign out and in again, then try within 10 minutes.",
     removePasskeys: "Remove passkeys",
+    noPasskeys: "This account has no passkeys.",
     passkeysRemoved_one: "Removed 1 passkey and signed out your other devices.",
     passkeysRemoved_other: "Removed {count} passkeys and signed out your other devices.",
     shareName: "Your name on the shared page",
@@ -358,6 +365,7 @@ export const STRINGS = {
     errServer: "Falló el servidor de sincronización. Probá más tarde.",
     errSignIn: "No se pudo iniciar sesión: {message}",
     errTooLarge: "Tus datos son demasiado grandes para el servidor de sincronización.",
+    errStorage: "El almacenamiento del navegador está lleno, así que el último cambio puede perderse al cerrar la app. Sincronizá ahora.",
     errWeakPassphrase: "Usá una frase de al menos 8 caracteres.",
 
     type_check: "Diario",
@@ -448,7 +456,7 @@ export const STRINGS = {
     cell_amount: "{value} de {target}",
     cell_off: "día libre",
     skip: "Omitir",
-    undoSkip: "No omitir",
+    undoSkip: "Deshacer",
     skipped: "Omitido",
     notScheduled: "No programado",
     dayOff: "Día libre",
@@ -505,8 +513,10 @@ export const STRINGS = {
 
     importData: "Importar datos",
     calendarFile: "Descargar calendario",
-    imported_one: "Se importó 1 hábito nuevo y {days} días de historial.",
-    imported_other: "Se importaron {count} hábitos nuevos y {days} días de historial.",
+    importedHabits_one: "Se importó 1 hábito nuevo.",
+    importedHabits_other: "Se importaron {count} hábitos nuevos.",
+    importedDays_one: "Se agregó historial de 1 día.",
+    importedDays_other: "Se agregó historial de {count} días.",
     errImport: "No se pudo leer ese archivo. Usá uno de Descargar mis datos, o un CSV con una columna Date.",
     type_timer: "Temporizador",
     minutes: "min",
@@ -559,6 +569,8 @@ export const STRINGS = {
     allHabits: "Todos los hábitos",
     breakFrom: "Desde",
     breakTo: "hasta",
+    breakStarts: "Inicio de la pausa",
+    breakEnds: "Fin de la pausa",
     removeBreak: "Quitar pausa",
     share: "Compartir",
     byWeekday: "Hecho por día de la semana, últimos 90 días",
@@ -593,12 +605,13 @@ export const STRINGS = {
     stepsDone: "{done}/{total} pasos",
     energy: "Energía",
     energyLevel: "Energía {level}",
-    passkeySignIn: "Entrar con una llave de acceso",
+    passkeySignIn: "Iniciar sesión con una llave de acceso",
     passkeyNew: "Cuenta nueva con una llave de acceso",
     addPasskey: "Agregar una llave de acceso",
     passkeyAdded: "Llave de acceso agregada. Ahora abre esta cuenta, y se cerró la sesión en tus otros dispositivos.",
     signedInPasskey: "Sesión iniciada con una llave de acceso",
     newRecovery: "Crear una clave de recuperación",
+    recoveryNeedsSync: "Sincronizá primero: la clave de recuperación se crea solo cuando la frase ya abrió tus datos.",
     recoveryMade: "Clave de recuperación: {code}. Anotala ahora. No se vuelve a mostrar, reemplaza a cualquier anterior y deja de servir si cambiás la frase.",
     forgot: "¿Olvidaste la frase?",
     recoveryCode: "Clave de recuperación",
@@ -612,13 +625,14 @@ export const STRINGS = {
     shareToggle: "Compartir el progreso con un enlace",
     shareHint: "Cualquiera con este enlace ve las rachas y los días recientes de los hábitos marcados abajo, y nada más. Está cifrado con una clave que solo tiene el enlace.",
     remindToggle: "Recordarme a la hora de cada hábito",
-    remindHint: "Envía una notificación a las horas puestas en tus hábitos. El servidor conoce las horas, no los hábitos.",
+    remindHint: "Envía una notificación todos los días a las horas puestas en tus hábitos, incluso en días libres. El servidor conoce las horas, no los hábitos.",
     errNotify: "Las notificaciones están bloqueadas para este sitio.",
     sharedTitle: "Progreso compartido",
     sharedUpdated: "Actualizado el {date}",
     sharedGone: "Este enlace ya no funciona.",
-    errFreshSignIn: "Para eso, cerrá la sesión y volvé a entrar, y después intentalo antes de 10 minutos.",
+    errFreshSignIn: "Eso necesita un inicio de sesión reciente. Sincronizá, cerrá la sesión, volvé a iniciarla e intentalo dentro de los 10 minutos.",
     removePasskeys: "Quitar llaves de acceso",
+    noPasskeys: "Esta cuenta no tiene llaves de acceso.",
     passkeysRemoved_one: "Se quitó 1 llave de acceso y se cerró la sesión en tus otros dispositivos.",
     passkeysRemoved_other: "Se quitaron {count} llaves de acceso y se cerró la sesión en tus otros dispositivos.",
     shareName: "Tu nombre en la página compartida",
@@ -645,6 +659,12 @@ export function t(key, vars = {}) {
   const form = vars.count == null ? null : `${key}_${vars.count === 1 ? "one" : "other"}`;
   const text = (form && (table[form] ?? STRINGS.en[form])) ?? table[key] ?? STRINGS.en[key] ?? key;
   return text.replace(/\{(\w+)\}/g, (_, name) => vars[name] ?? "");
+}
+
+// `avoid` habits count clean days.
+export function streakText(avoid, s) {
+  if (avoid) return t("clean", { units: t("day", { count: s.current }) });
+  return s.current ? t("streak", { units: t(s.unit, { count: s.current }) }) : t("noStreak");
 }
 
 export function applyTranslations() {

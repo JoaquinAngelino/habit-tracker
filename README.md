@@ -17,7 +17,7 @@ For amounts, weekly and monthly habits, **+** and **−** log more than once a d
 
 ### Days off
 
-Daily, amount and timer habits can repeat every day, on some days of the week, or every few days counted from their start date. Any single day can be skipped, and **Habits → Breaks** pauses one habit or all of them between two dates, for a holiday or sick days. Avoid habits keep counting through a break.
+Daily, amount and timer habits can repeat every day, on some days of the week, or every few days counted from the day that was chosen. Any single day can be skipped, and **Habits → Breaks** pauses one habit or all of them between two dates, for a holiday or sick days. Avoid habits keep counting through a break.
 
 A day off does not break the streak or count against the completion rate, and still counts if you log it anyway. For weekly and monthly habits, a week or month that a break touches is off unless its target was met.
 
@@ -46,7 +46,7 @@ A goal counts done days (or the sum, for amounts) from the day it was set until 
 
 Things to do, buy or fix, with an optional due date. Tasks due today or overdue also show on **Today**.
 
-A task can have steps to check off, and can repeat daily, weekly or monthly: finishing it opens the next one, due on the first date after today counted from its due date.
+A task can have steps to check off, and can repeat daily, weekly or monthly: finishing it opens the next one, due on the first date after today counted from the first due date, so the 31st stays the 31st. Undoing takes the next one back.
 
 ## Storage
 
@@ -57,27 +57,27 @@ Everything saves in the browser first and works offline, including opening the a
 
 When syncing, the data is compressed and then encrypted in the browser (AES-256-GCM, key from your passphrase through PBKDF2-SHA256 with 600,000 iterations) before it is sent, so the server cannot read it. Use the same passphrase, of at least 8 characters, on every device. A lost passphrase cannot be recovered, and neither can the data. **Settings → Download my data** saves everything as a readable JSON file.
 
-**Settings → Import data** adds a file to what is already there. It takes a file from **Download my data**, or a CSV with a `Date` column and either one column per habit or `habit` and `value` columns. Habits are matched by name and new ones are created. A CSV whose values are all Loop Habit Tracker's codes is read as its `Checkmarks.csv`: 2 is done and 3 is skipped. A check-in log like Habitify's (`Habit`, `Date`) and an export like Streaks' (`title`, `entry_date`, `entry_type`, `quantity`) are read as one row per entry. None of the three has been tried on a real export: the column names come from those apps' help pages and a community converter.
+**Settings → Import data** adds a file to what is already there. It takes a file from **Download my data**, or a CSV with a `Date` column and either one column per habit or `habit` and `value` columns. Habits are matched by name and new ones are created. A file named `Checkmarks.csv`, as Loop Habit Tracker exports it, is read by Loop's codes: 2 is done and 3 is skipped. Columns may be separated by commas or semicolons. What is already in the app is never changed by an import: only habits, tasks and days it lacks are added. A check-in log like Habitify's (`Habit`, `Date`) and an export like Streaks' (`title`, `entry_date`, `entry_type`, `quantity`) are read as one row per entry. None of the three has been tried on a real export: the column names come from those apps' help pages and a community converter.
 
-**Settings → Download calendar** saves an `.ics` file with each habit as a repeating event and each open task with a due date, to import into a calendar app. It is a snapshot: later changes need a new download.
+**Settings → Download calendar** saves an `.ics` file with each habit as a repeating event and each open task with a due date, to import into a calendar app. Skipped days and breaks still show as events. It is a snapshot: later changes need a new download.
 
 The copy on the device itself is compressed but not encrypted, in IndexedDB, with unsynced edits in `localStorage`. The site is served from `joaquinangelino.github.io`, which every GitHub Pages site under that account shares, so those sites can read it too.
 
-Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Changes from other devices arrive when the app opens, when you come back to it after 2 minutes or more, or with **Sync now**. A save goes through only if nobody saved in between; otherwise the newer file is fetched and your unsynced edits are replayed on top of it, so edits from two devices merge. When both change the same thing, the last one synced wins: a habit's entry, skip or note for a day, the day's mood and note together, or a whole habit, task, goal or break. Editing something another device deleted brings it back.
+Changes save 30 seconds after your last edit, when you leave the app, or with **Sync now**. Changes from other devices arrive when the app opens, when you come back to it after 2 minutes or more, or with **Sync now**. A save goes through only if nobody saved in between; otherwise the newer file is fetched and your unsynced edits are replayed on top of it, so edits from two devices merge. When both change the same thing, the last one synced wins: a habit's entry, skip or note for a day, the day's mood, energy or note, or a whole habit, task, goal or break. Editing something another device deleted brings it back.
 
 Data that has never synced merges into the first account it syncs with. A different account never receives data that came from another one: signing in with it starts empty, and the previous account's unsynced edits are dropped.
 
-### Account extras
+### With an account
 
 With an account, **Settings** also offers:
 
 - **Add a passkey**: a second way in to the same account. It works only within 10 minutes of signing in, and signs out the account's other devices, so a stolen session cannot quietly keep access. **Remove passkeys** takes them all off again, under the same 10-minute rule. **New account with a passkey** makes an account with no Google sign-in at all.
 - **Create a recovery key**: 24 characters to write down. The passphrase is encrypted with it in the browser and kept on the server, and **Forgot the passphrase?** brings it back. Without a recovery key a lost passphrase is still unrecoverable. A new key replaces the old one, and changing the passphrase needs a new key.
-- **Share progress with a link**: the streaks, 30-day rate and last 12 weeks of the habits you tick, on a page anyone with the link can open. It is encrypted with a key that sits after the `#` of the link, which browsers do not send to servers. The page can follow several links at once, under each person's name, so a coach or a group sees everyone's progress together; the list is kept in that browser.
+- **Share progress with a link**: the streaks, 30-day rate and last 12 weeks of the habits you tick, on a page anyone with the link can open. The habits chosen and the name shown sync with your data. It is encrypted with a key that sits after the `#` of the link, which browsers do not send to servers. The page can follow several links at once, under each person's name, so a coach or a group sees everyone's progress together; the list is kept in that browser.
 - **Publish a calendar link**: an address calendar apps subscribe to, kept up to date after each sync. It is the one thing stored **unencrypted**: the server and anyone with the link can read the names and times of habits and dated tasks.
-- **Remind me at each habit's time**: a notification at the times set on habits, on this device. The server gets the times and the browser's push address, and sends a push with no text. Shown only once the server has push keys (see [Server](#server)).
+- **Remind me at each habit's time**: a notification every day at the times set on habits, on this device. It does not follow weekdays, skips or breaks, or whether the habit is already done. The server gets the times and the browser's push address, and sends a push with no text. Shown only once the server has push keys (see [Server](#server)).
 
-Links and reminders are refreshed after a sync when what they show has changed. Signing out makes the device forget them but leaves them published; sign in and turn them off to remove them.
+Links and reminders are refreshed after a sync that changed something. What is published is read from the server, so every device shows the same switches, and a link turned off on one device stays off. Signing out stops this device's reminders and leaves links published.
 
 ### Remember
 
@@ -85,7 +85,7 @@ With **Remember** on, the passphrase, sign-in and email stay in `localStorage`; 
 
 ## Server
 
-`worker/` is a Cloudflare Worker with a D1 database behind **Sync with → Account**. It stores each account's Google user ID or passkey and the same encrypted file, so it cannot read anyone's habits. The only readable thing it can hold is a calendar link someone chose to publish.
+`worker/` is a Cloudflare Worker with a D1 database behind **Sync with → Account**. It stores each account's Google user ID or passkey and the same encrypted file, so it cannot read anyone's habits. What it can read is only what someone chose to hand it: a published calendar link, and the times of day and push address for reminders.
 
 | Request | Does |
 | --- | --- |
@@ -94,19 +94,22 @@ With **Remember** on, the passphrase, sign-in and email stay in `localStorage`; 
 | `GET /vault` | Returns the encrypted file as raw bytes with its version in `X-Version`, or `204` while the `X-Have` version is still current |
 | `PUT /vault` | Saves the bytes if the `X-Version` sent (`0` for none yet) is still current, otherwise `409` with the newer file |
 
-Versions are random, so a vault recreated after a deletion never matches one a device still holds, and they travel in headers so the URL, and with it the browser's cached CORS preflight, stays the same.
 | `DELETE /account` | Deletes the account and its data |
 | `POST /passkey/challenge` | Returns a challenge, good once and for 5 minutes |
 | `POST /passkey/register` | Stores a passkey's public key: for a new account, or for the account of a session that began in the last 10 minutes, whose other sessions then end |
 | `GET /passkeys`, `DELETE /passkeys` | Counts an account's passkeys, and removes them all, with the same 10-minute rule, unless a passkey is its only way in |
 | `POST /passkey/session` | Trades a passkey signature over a challenge for a session token |
-| `PUT /link/feed`, `PUT /link/share` | Publishes the body at an unguessable address and returns its token; again keeps the token |
+| `GET /links` | Lists what the account has published |
+| `POST /link/feed`, `POST /link/share` | Publishes the body at an unguessable address and returns its token; again keeps the token |
+| `PUT /link/feed`, `PUT /link/share` | Brings a published one up to date, or `404` once it was taken down |
 | `DELETE /link/feed`, `DELETE /link/share` | Takes it down |
 | `GET /feed/<token>.ics`, `GET /share/<token>` | Returns it to anyone |
 | `PUT /recovery`, `GET /recovery` | Saves and returns the passphrase as encrypted by a recovery key |
 | `PUT /reminders` | Sets the minutes of the UTC day at which a push address is sent to; none removes it |
 
-A cron trigger runs every minute and sends a push with no body to the addresses due. Passkeys are registered without attestation, so the server takes the public key as the browser reports it. Push addresses are accepted only on the browsers' own push services.
+Versions are random, so a vault recreated after a deletion never matches one a device still holds, and they travel in headers so the URL, and with it the browser's cached CORS preflight, stays the same.
+
+A cron trigger runs every minute and sends a push with no body to the addresses due. Passkeys are registered without attestation, so the server takes the public key as the browser reports it; sign-in requires user verification. The passkey routes are limited per address, and an account can have reminders on five devices. Push addresses are accepted only on the browsers' own push services.
 
 Reminders need a VAPID key pair: `npx web-push generate-vapid-keys`, then put the public key in `VAPID_PUBLIC_KEY` in both `wrangler.toml` and `src/server.js`, and run `npx wrangler secret put VAPID_PRIVATE_KEY`.
 

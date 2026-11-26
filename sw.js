@@ -13,9 +13,10 @@ const SHELL = [
   "privacy.html",
   "share.html",
   "terms.html",
+  "src/account.js",
   "src/app.js",
+  "src/card.js",
   "src/crypto.js",
-  "src/extras.js",
   "src/http.js",
   "src/i18n.js",
   "src/ics.js",
@@ -24,7 +25,6 @@ const SHELL = [
   "src/insights.js",
   "src/lib.js",
   "src/server.js",
-  "src/share.js",
   "src/storage.js",
   "src/store.js",
   "src/ui.js",
@@ -58,17 +58,18 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// A reminder arrives with no text, so the server never holds any; the wording is the browser's language.
-self.addEventListener("push", (event) => {
-  const es = (self.navigator.language ?? "").startsWith("es");
-  event.waitUntil(
-    self.registration.showNotification(es ? "Mis hábitos" : "Habit Tracker", {
-      body: es ? "Es hora de tus hábitos." : "Time for your habits.",
-      icon: "icons/icon-192.png",
-      tag: "habits",
-    }),
-  );
-});
+// A reminder arrives with no text, so the server never holds any. The app leaves its language where this can read it.
+async function remind() {
+  const saved = await (await caches.open("habit-tracker-settings")).match("lang");
+  const es = ((await saved?.text()) ?? self.navigator.language ?? "").startsWith("es");
+  return self.registration.showNotification(es ? "Mis hábitos" : "Habit Tracker", {
+    body: es ? "Es hora de tus hábitos." : "Time for your habits.",
+    icon: "icons/icon-192.png",
+    tag: "habits",
+  });
+}
+
+self.addEventListener("push", (event) => event.waitUntil(remind()));
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();

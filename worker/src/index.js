@@ -15,6 +15,16 @@ const CHALLENGE_TTL = 5 * 60_000;
 // A stolen session must not be able to mint a way in that outlives it.
 const FRESH_SIGN_IN = 10 * 60_000;
 const MAX_REMINDERS = 48;
+const MAX_REMINDER_DEVICES = 5;
+// One run stays under the worker's limit on outgoing requests.
+const MAX_REMINDED = 900;
+const REMIND_BATCH = 40;
+// Most calls allowed per address in each window, on the routes anyone can call.
+const RATE_LIMITS = {
+  "POST /passkey/challenge": [30, 60_000],
+  "POST /passkey/session": [30, 60_000],
+  "POST /passkey/register": [5, 3_600_000],
+};
 const P256 = { name: "ECDSA", namedCurve: "P-256" };
 const ES256 = { name: "ECDSA", hash: "SHA-256" };
 // The worker posts to addresses clients hand it, so only the browsers' push services are accepted.
@@ -99,7 +109,18 @@ async function signIn(request, env) {
     .bind(crypto.randomUUID(), sub, now)
     .run();
   const user = await env.DB.prepare("SELECT id FROM users WHERE google_sub = ?").bind(sub).first();
-  return json(await startSession(env, user.id));
+  return json({ ...(await startSession(env, user.id)), userId: user.id });
+}
+
+async function limitRate(request, env, key) {
+  const [max, every] = RATE_LIMITS[key];
+  const who = `${request.headers.get("CF-Connecting-IP") ?? "unknown"} ${key}`;
+  const slot = Math.floor(Date.now() / every);
+  const { count } = await env.DB.prepare(
+    "INSERT INTO rate_limits (key, slot, count) VALUES (?, ?, 1) ON CONFLICT (key, slot) DO UPDATE SET count = count + 1 RETURNING count",
+  ).bind(who, slot).first();
+  if (count === 1) await env.DB.prepare("DELETE FROM rate_limits WHERE key = ? AND slot < ?").bind(who, slot).run();
+  if (count > max) throw new HttpError(429, "Too many requests");
 }
 
 async function startSession(env, userId) {
@@ -119,7 +140,6 @@ async function startSession(env, userId) {
 const origins = (env) => (env.ALLOWED_ORIGINS ?? "").split(",").map((o) => o.trim());
 const invalidPasskey = () => new HttpError(401, "Invalid passkey");
 
-// Changing how an account is entered takes a session that began moments ago, so a stolen one cannot do it.
 function requireFresh(session) {
   if (!(session.createdAt > Date.now() - FRESH_SIGN_IN)) throw new HttpError(403, "Sign in again to change passkeys");
 }
@@ -196,14 +216,19 @@ function rawSignature(der) {
 async function passkeySignIn(request, env) {
   const { credentialId, authenticatorData, clientDataJSON, signature } = await readJson(request);
   const data = await clientData(clientDataJSON, "webauthn.get", env);
-  const passkey = await env.DB.prepare("SELECT user_id, public_key FROM passkeys WHERE credential_id = ?").bind(String(credentialId)).first();
+  const passkey = await env.DB.prepare("SELECT user_id, public_key, sign_count FROM passkeys WHERE credential_id = ?").bind(String(credentialId)).first();
   if (!passkey) throw invalidPasskey();
   let valid = false;
+  let count = 0;
   try {
     const auth = b64urlBytes(authenticatorData);
     const site = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(new URL(data.origin).hostname)));
-    // The first 32 bytes name the site the passkey belongs to; bit 0 of the next says a person was present.
-    if (auth.length < 37 || !(auth[32] & 1) || !site.every((b, i) => b === auth[i])) throw invalidPasskey();
+    // The first 32 bytes name the site the passkey belongs to; in the next, bits 0 and 2 say a person was
+    // present and was verified. Then comes a use counter, which stays 0 on passkeys that sync between devices.
+    if (auth.length < 37 || (auth[32] & 5) !== 5 || !site.every((b, i) => b === auth[i])) throw invalidPasskey();
+    count = new DataView(auth.buffer, auth.byteOffset).getUint32(33);
+    // A counter that does not move forward means a copy of the passkey is in use.
+    if ((count || passkey.sign_count) && count <= passkey.sign_count) throw invalidPasskey();
     const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", b64urlBytes(clientDataJSON)));
     const signed = new Uint8Array(auth.length + hash.length);
     signed.set(auth);
@@ -214,6 +239,7 @@ async function passkeySignIn(request, env) {
     valid = false;
   }
   if (!valid) throw invalidPasskey();
+  if (count) await env.DB.prepare("UPDATE passkeys SET sign_count = ? WHERE credential_id = ?").bind(count, String(credentialId)).run();
   return json({ ...(await startSession(env, passkey.user_id)), userId: passkey.user_id });
 }
 
@@ -256,10 +282,7 @@ async function readVault(request, url, env, userId) {
 async function writeVault(request, url, env, userId) {
   const version = versionFrom(request, url, "X-Version", "version");
   if (!/^[\w-]{1,64}$/.test(version)) throw new HttpError(400, "Expected a version");
-  if (Number(request.headers.get("Content-Length")) > MAX_ENVELOPE) throw new HttpError(413, "Data is too large");
-  const envelope = await request.arrayBuffer();
-  if (!envelope.byteLength) throw new HttpError(400, "Expected the encrypted data");
-  if (envelope.byteLength > MAX_ENVELOPE) throw new HttpError(413, "Data is too large");
+  const envelope = await readBody(request, MAX_ENVELOPE);
   const now = Date.now();
   const next = newVersion();
   const result = version === "0"
@@ -292,7 +315,7 @@ async function removePasskeys(env, session) {
   return new Response(null, { status: 204 });
 }
 
-async function body(request, max) {
+async function readBody(request, max) {
   if (Number(request.headers.get("Content-Length")) > max) throw new HttpError(413, "Data is too large");
   const bytes = await request.arrayBuffer();
   if (!bytes.byteLength) throw new HttpError(400, "Expected a body");
@@ -300,13 +323,23 @@ async function body(request, max) {
   return bytes;
 }
 
-// Publishing again keeps the address, so a calendar or a friend's link keeps working.
-async function writeLink(request, env, userId, kind) {
-  const bytes = await body(request, MAX_LINK);
-  await env.DB.prepare(
-    "INSERT INTO links (token, user_id, kind, body, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user_id, kind) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at",
-  ).bind(b64url(crypto.getRandomValues(new Uint8Array(24))), userId, kind, bytes, Date.now()).run();
-  return json(await env.DB.prepare("SELECT token FROM links WHERE user_id = ? AND kind = ?").bind(userId, kind).first());
+// Publishing again keeps the address, so a calendar or a friend's link keeps working. Only `create` may
+// publish what is not there: a device bringing a link up to date must not bring back one that was taken down.
+async function writeLink(request, env, userId, kind, create) {
+  const bytes = await readBody(request, MAX_LINK);
+  const now = Date.now();
+  const link = create
+    ? await env.DB.prepare(
+      "INSERT INTO links (token, user_id, kind, body, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user_id, kind) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at RETURNING token",
+    ).bind(b64url(crypto.getRandomValues(new Uint8Array(24))), userId, kind, bytes, now).first()
+    : await env.DB.prepare("UPDATE links SET body = ?, updated_at = ? WHERE user_id = ? AND kind = ? RETURNING token").bind(bytes, now, userId, kind).first();
+  if (!link) throw new HttpError(404, "Not published");
+  return json(link);
+}
+
+async function listLinks(env, userId) {
+  const { results } = await env.DB.prepare("SELECT kind, token FROM links WHERE user_id = ?").bind(userId).all();
+  return json(Object.fromEntries(results.map((link) => [link.kind, link.token])));
 }
 
 async function deleteLink(env, userId, kind) {
@@ -322,7 +355,7 @@ async function readLink(env, kind, token) {
 }
 
 async function writeRecovery(request, env, userId) {
-  const bytes = await body(request, MAX_RECOVERY);
+  const bytes = await readBody(request, MAX_RECOVERY);
   await env.DB.prepare("INSERT INTO recovery (user_id, body, updated_at) VALUES (?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at")
     .bind(userId, bytes, Date.now())
     .run();
@@ -351,6 +384,8 @@ async function writeReminders(request, env, userId) {
   const url = pushEndpoint(endpoint);
   const list = [...new Set(Array.isArray(minutes) ? minutes : [])];
   if (list.length > MAX_REMINDERS || !list.every((m) => Number.isInteger(m) && m >= 0 && m < 1440)) throw new HttpError(400, "Expected minutes of the day");
+  const others = await env.DB.prepare("SELECT COUNT(DISTINCT endpoint) AS n FROM reminders WHERE user_id = ? AND endpoint != ?").bind(userId, url).first();
+  if (list.length && others.n >= MAX_REMINDER_DEVICES) throw new HttpError(400, "Too many devices have reminders");
   await env.DB.batch([
     env.DB.prepare("DELETE FROM reminders WHERE endpoint = ?").bind(url),
     ...list.map((m) => env.DB.prepare("INSERT INTO reminders (endpoint, minute, user_id) VALUES (?, ?, ?)").bind(url, m, userId)),
@@ -358,33 +393,46 @@ async function writeReminders(request, env, userId) {
   return new Response(null, { status: 204 });
 }
 
-// Signs the worker's identity for a push service, as VAPID asks.
-async function vapid(env, endpoint) {
+// Signs the worker's identity for a push service, as VAPID asks. The signature depends only on the service,
+// so one is made per service and shared by every push of a run.
+async function vapidSigner(env) {
   const point = b64urlBytes(env.VAPID_PUBLIC_KEY);
   const jwk = { kty: "EC", crv: "P-256", d: env.VAPID_PRIVATE_KEY, x: b64url(point.slice(1, 33)), y: b64url(point.slice(33)) };
   const key = await crypto.subtle.importKey("jwk", jwk, P256, false, ["sign"]);
   const part = (value) => b64url(encoder.encode(JSON.stringify(value)));
-  const unsigned = `${part({ typ: "JWT", alg: "ES256" })}.${part({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: env.VAPID_SUBJECT })}`;
-  const signature = new Uint8Array(await crypto.subtle.sign(ES256, key, encoder.encode(unsigned)));
-  return `vapid t=${unsigned}.${b64url(signature)}, k=${env.VAPID_PUBLIC_KEY}`;
+  const signed = new Map();
+  const sign = async (origin) => {
+    const unsigned = `${part({ typ: "JWT", alg: "ES256" })}.${part({ aud: origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: env.VAPID_SUBJECT })}`;
+    const signature = new Uint8Array(await crypto.subtle.sign(ES256, key, encoder.encode(unsigned)));
+    return `vapid t=${unsigned}.${b64url(signature)}, k=${env.VAPID_PUBLIC_KEY}`;
+  };
+  return (endpoint) => {
+    const { origin } = new URL(endpoint);
+    if (!signed.has(origin)) signed.set(origin, sign(origin));
+    return signed.get(origin);
+  };
 }
 
 // A push with no body: the app words the notification itself, so the server never holds its text.
 async function remind(env, now) {
-  if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) return 0;
+  if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) return;
   const at = new Date(now);
   const minute = at.getUTCHours() * 60 + at.getUTCMinutes();
-  const { results } = await env.DB.prepare("SELECT DISTINCT endpoint FROM reminders WHERE minute = ?").bind(minute).all();
-  await Promise.all(results.map(async ({ endpoint }) => {
-    try {
-      const res = await fetch(endpoint, { method: "POST", headers: { Authorization: await vapid(env, endpoint), TTL: "3600" } });
-      // The browser dropped the subscription.
-      if (res.status === 404 || res.status === 410) await env.DB.prepare("DELETE FROM reminders WHERE endpoint = ?").bind(endpoint).run();
-    } catch (err) {
-      console.error(err);
-    }
-  }));
-  return results.length;
+  const { results } = await env.DB.prepare("SELECT DISTINCT endpoint FROM reminders WHERE minute = ? LIMIT ?").bind(minute, MAX_REMINDED).all();
+  const header = await vapidSigner(env);
+  const dropped = [];
+  for (let i = 0; i < results.length; i += REMIND_BATCH) {
+    await Promise.all(results.slice(i, i + REMIND_BATCH).map(async ({ endpoint }) => {
+      try {
+        const res = await fetch(endpoint, { method: "POST", headers: { Authorization: await header(endpoint), TTL: "3600" } });
+        // The browser dropped the subscription.
+        if (res.status === 404 || res.status === 410) dropped.push(endpoint);
+      } catch (err) {
+        console.error(err);
+      }
+    }));
+  }
+  if (dropped.length) await env.DB.batch(dropped.map((endpoint) => env.DB.prepare("DELETE FROM reminders WHERE endpoint = ?").bind(endpoint)));
 }
 
 async function deleteAccount(env, userId) {
@@ -405,16 +453,19 @@ const ROUTES = {
   "GET /vault": (request, url, env, { userId }) => readVault(request, url, env, userId),
   "PUT /vault": (request, url, env, { userId }) => writeVault(request, url, env, userId),
   "DELETE /account": (request, url, env, { userId }) => deleteAccount(env, userId),
-  "PUT /link/feed": (request, url, env, { userId }) => writeLink(request, env, userId, "feed"),
-  "PUT /link/share": (request, url, env, { userId }) => writeLink(request, env, userId, "share"),
-  "DELETE /link/feed": (request, url, env, { userId }) => deleteLink(env, userId, "feed"),
-  "DELETE /link/share": (request, url, env, { userId }) => deleteLink(env, userId, "share"),
+  "GET /links": (request, url, env, { userId }) => listLinks(env, userId),
   "GET /passkeys": (request, url, env, { userId }) => passkeyCount(env, userId),
   "DELETE /passkeys": (request, url, env, session) => removePasskeys(env, session),
   "PUT /recovery": (request, url, env, { userId }) => writeRecovery(request, env, userId),
   "GET /recovery": (request, url, env, { userId }) => readRecovery(env, userId),
   "PUT /reminders": (request, url, env, { userId }) => writeReminders(request, env, userId),
 };
+
+for (const kind of Object.keys(LINK_TYPES)) {
+  ROUTES[`POST /link/${kind}`] = (request, url, env, { userId }) => writeLink(request, env, userId, kind, true);
+  ROUTES[`PUT /link/${kind}`] = (request, url, env, { userId }) => writeLink(request, env, userId, kind, false);
+  ROUTES[`DELETE /link/${kind}`] = (request, url, env, { userId }) => deleteLink(env, userId, kind);
+}
 
 const OPEN_ROUTES = {
   "POST /session": signIn,
@@ -426,6 +477,7 @@ const OPEN_ROUTES = {
 async function route(request, env) {
   const url = new URL(request.url);
   const key = `${request.method} ${url.pathname}`;
+  if (RATE_LIMITS[key]) await limitRate(request, env, key);
   if (OPEN_ROUTES[key]) return OPEN_ROUTES[key](request, env);
   const link = request.method === "GET" && /^\/(feed|share)\/([\w-]{16,64})(\.ics)?$/.exec(url.pathname);
   if (link) return readLink(env, link[1], link[2]);

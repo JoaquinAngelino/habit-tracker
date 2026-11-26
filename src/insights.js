@@ -1,12 +1,16 @@
-import { addDays, later, weekday, entry, isDone, isOff, periodCount, streak } from "./lib.js";
+import { addDays, later, weekday, entry, isDone, isAmount, isOff, periodCount, streak, recentLevels } from "./lib.js";
+
+export const LINK_WEEKS = 12;
 
 const perDay = (habit) => habit.type !== "weekly" && habit.type !== "monthly";
+// For an avoid habit "done" means a clean day, which would read backwards next to its name.
+const linkable = (habit) => perDay(habit) && habit.type !== "avoid";
 
-// Each day in the window the habit was due, with whether it got done. Today counts only once it is done,
+// Each day from `from` to `to` the habit was due, with whether it got done. Today counts only once it is done,
 // and for weekly and monthly habits done means logged that day.
-function dueDays(data, habit, today, days) {
+export function dueDays(data, habit, from, to, today) {
   const out = new Map();
-  for (let d = later(addDays(today, -(days - 1)), habit.start); d <= today; d = addDays(d, 1)) {
+  for (let d = later(from, habit.start); d <= to; d = addDays(d, 1)) {
     const done = isDone(habit, entry(data, habit.id, d));
     if (!done && (isOff(data, habit, d) || (d === today && habit.type !== "avoid"))) continue;
     out.set(d, done);
@@ -14,10 +18,12 @@ function dueDays(data, habit, today, days) {
   return out;
 }
 
+const lastDays = (data, habit, today, days) => dueDays(data, habit, addDays(today, -(days - 1)), today, today);
+
 // Share of each weekday, Monday first, on which the habit got done; null for a weekday it was never due.
 export function weekdayPattern(data, habit, today, days = 90) {
   const slots = Array.from({ length: 7 }, () => ({ done: 0, due: 0 }));
-  for (const [date, done] of dueDays(data, habit, today, days)) {
+  for (const [date, done] of lastDays(data, habit, today, days)) {
     const slot = slots[weekday(date)];
     slot.due++;
     if (done) slot.done++;
@@ -28,7 +34,7 @@ export function weekdayPattern(data, habit, today, days = 90) {
 // Pairs of habits that tend to get done, or missed, on the same days. `withA` and `withoutA` are how often
 // b got done on days a was done and on days it was not.
 export function correlations(data, habits, today, { days = 90, minDays = 14, minPhi = 0.3, limit = 5 } = {}) {
-  const series = habits.filter(perDay).map((habit) => ({ habit, days: dueDays(data, habit, today, days) }));
+  const series = habits.filter(linkable).map((habit) => ({ habit, days: lastDays(data, habit, today, days) }));
   const out = [];
   for (let i = 0; i < series.length; i++) {
     for (let j = i + 1; j < series.length; j++) {
@@ -61,10 +67,10 @@ const moodOn = (data, date) => data.days?.[date]?.mood || null;
 // Habits whose done days have a different average mood than their missed days.
 export function moodLinks(data, habits, today, { days = 90, minDays = 5, minDiff = 0.3, limit = 5 } = {}) {
   const out = [];
-  for (const habit of habits.filter(perDay)) {
+  for (const habit of habits.filter(linkable)) {
     const done = [];
     const missed = [];
-    for (const [date, wasDone] of dueDays(data, habit, today, days)) {
+    for (const [date, wasDone] of lastDays(data, habit, today, days)) {
       const mood = moodOn(data, date);
       if (mood) (wasDone ? done : missed).push(mood);
     }
@@ -94,15 +100,8 @@ export function weekReview(data, habits, start, today) {
       rows.push({ habit, done: Math.min(target, periodCount(data, habit, start)), due: target });
       continue;
     }
-    let done = 0;
-    let due = 0;
-    for (let d = later(start, habit.start); d <= end; d = addDays(d, 1)) {
-      const met = isDone(habit, entry(data, habit.id, d));
-      if (!met && (isOff(data, habit, d) || (d === today && habit.type !== "avoid"))) continue;
-      due++;
-      if (met) done++;
-    }
-    if (due) rows.push({ habit, done, due });
+    const days = [...dueDays(data, habit, start, end, today).values()];
+    if (days.length) rows.push({ habit, done: days.filter(Boolean).length, due: days.length });
   }
   const done = rows.reduce((n, r) => n + r.done, 0);
   const due = rows.reduce((n, r) => n + r.due, 0);
@@ -140,7 +139,9 @@ export function yearRecap(data, habits, year, today) {
   let best = null;
   for (const habit of habits) {
     if (habit.start > to) continue;
-    const s = streak(data, { ...habit, start: later(habit.start, from) }, to);
+    // The streak is walked from the start of the year, with every-N days still counted from where they were.
+    const inYear = { ...habit, start: later(habit.start, from), everyFrom: habit.everyFrom ?? habit.start };
+    const s = streak(data, inYear, to);
     if (s.best && (!best || s.best > best.count) && s.unit === "day") best = { habit, count: s.best };
   }
   return {
@@ -150,8 +151,24 @@ export function yearRecap(data, habits, year, today) {
     activeDays,
     top: topId ? { habit: byId.get(topId), days: topDays } : null,
     streak: best,
-    totals: habits.filter((h) => (h.type === "amount" || h.type === "timer") && totals.get(h.id)).map((habit) => ({ habit, total: totals.get(habit.id) })),
+    totals: habits.filter((h) => isAmount(h) && totals.get(h.id)).map((habit) => ({ habit, total: totals.get(habit.id) })),
     tasksDone: tasksDoneBetween(data, from, to),
     mood: moodBetween(data, from, to),
+  };
+}
+
+// What a share link shows: a name, and each habit's name, streak, 30-day rate and recent days. No notes, amounts or tasks.
+export function sharedProgress(data, habits, today, name, rateOf) {
+  return {
+    v: 1,
+    name,
+    updated: today,
+    habits: habits.map((habit) => ({
+      name: habit.name,
+      avoid: habit.type === "avoid",
+      streak: streak(data, habit, today),
+      rate: rateOf(habit),
+      cells: recentLevels(data, habit, today, LINK_WEEKS),
+    })),
   };
 }

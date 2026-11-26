@@ -25,6 +25,8 @@ export function el(tag, props = {}, children = []) {
   return e;
 }
 
+export const mark = (text, tone) => el("span", { class: "mark", "data-tone": tone, textContent: text });
+
 export function icon(name) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 16 16");

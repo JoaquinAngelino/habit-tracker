@@ -9,7 +9,6 @@ const auth = (session) => (session ? { Authorization: `Bearer ${session}` } : {}
 
 function code(status, session) {
   if (status === 401 && session) return "errSignedOut";
-  if (status === 403) return "errFreshSignIn";
   if (status === 413) return "errTooLarge";
   if (status >= 500) return "errServer";
   return undefined;
@@ -35,30 +34,35 @@ export const signIn = (credential) => call("/session", { method: "POST", body: {
 export const signOut = (session) => call("/session", { method: "DELETE", session });
 export const deleteAccount = (session) => call("/account", { method: "DELETE", session });
 export const passkeyChallenge = () => call("/passkey/challenge", { method: "POST" });
-export const passkeyRegister = (body, session) => call("/passkey/register", { method: "POST", body, session });
+// The server refuses a change to passkeys from a session that is not fresh.
+const needsFresh = (err) => {
+  if (err.status === 403) err.code = "errFreshSignIn";
+  throw err;
+};
+export const passkeyRegister = (body, session) => call("/passkey/register", { method: "POST", body, session }).catch(needsFresh);
 export const passkeyCount = (session) => call("/passkeys", { session });
-export const removePasskeys = (session) => call("/passkeys", { method: "DELETE", session });
+export const removePasskeys = (session) => call("/passkeys", { method: "DELETE", session }).catch(needsFresh);
 export const passkeySignIn = (body) => call("/passkey/session", { method: "POST", body });
 export const setReminders = (session, endpoint, minutes) => call("/reminders", { method: "PUT", session, body: { endpoint, minutes } });
 
-async function bytes(path, { method = "GET", session, body } = {}) {
+async function sendBytes(path, { method = "GET", session, body } = {}) {
   const res = await fetch(API + path, { method, cache: "no-store", headers: { ...auth(session), ...(body && { "Content-Type": "application/octet-stream" }) }, body });
   if (!res.ok) await fail(res, session);
   return res;
 }
+const readBytes = async (path, session) => new Uint8Array(await (await sendBytes(path, { session })).arrayBuffer());
 
-// `kind` is "feed" or "share". Publishing again keeps the address.
-export const publishLink = async (kind, session, body) => (await bytes(`/link/${kind}`, { method: "PUT", session, body })).json();
+// `kind` is "feed" or "share". Publishing keeps the address; updating one that was taken down fails with 404.
+export const publishedLinks = (session) => call("/links", { session });
+export const publishLink = async (kind, session, body) => (await sendBytes(`/link/${kind}`, { method: "POST", session, body })).json();
+export const updateLink = async (kind, session, body) => (await sendBytes(`/link/${kind}`, { method: "PUT", session, body })).json();
 export const removeLink = (kind, session) => call(`/link/${kind}`, { method: "DELETE", session });
 export const feedUrl = (token) => `${API}/feed/${token}.ics`;
-export const readShare = async (token) => new Uint8Array(await (await bytes(`/share/${token}`)).arrayBuffer());
-export const saveRecovery = (session, body) => bytes("/recovery", { method: "PUT", session, body });
-export const readRecovery = async (session) => new Uint8Array(await (await bytes("/recovery", { session })).arrayBuffer());
+export const readShare = (token) => readBytes(`/share/${token}`);
+export const saveRecovery = async (session, body) => void (await sendBytes("/recovery", { method: "PUT", session, body }));
+export const readRecovery = (session) => readBytes("/recovery", session);
 
 const file = async (res) => ({ version: res.headers.get("X-Version"), bytes: new Uint8Array(await res.arrayBuffer()) });
-
-// Writes may go out without a read first: a conflict carries the newer file as `current`.
-export const writesBlind = true;
 
 // `held` is the copy already on the device; the server sends the data only when it has a different one.
 // Versions travel in headers so the URL, and with it the browser's cached CORS preflight, never changes.

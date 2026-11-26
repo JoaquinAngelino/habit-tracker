@@ -2,12 +2,19 @@ import { emptyData, normalize } from "./lib.js";
 
 const formatError = () => Object.assign(new Error("Unrecognized file"), { code: "errImport" });
 
+// Spreadsheets in languages that write decimals with a comma separate columns with semicolons.
+const delimiterOf = (text) => {
+  const head = text.split(/\r?\n/, 1)[0];
+  return head.split(";").length > head.split(",").length ? ";" : ",";
+};
+
 export function parseCsv(text) {
+  const src = text.replace(/^﻿/, "");
+  const delimiter = delimiterOf(src);
   const rows = [];
   let row = [];
   let cell = "";
   let quoted = false;
-  const src = text.replace(/^﻿/, "");
   for (let i = 0; i < src.length; i++) {
     const ch = src[i];
     if (quoted) {
@@ -17,7 +24,7 @@ export function parseCsv(text) {
       } else if (ch === '"') quoted = false;
       else cell += ch;
     } else if (ch === '"') quoted = true;
-    else if (ch === ",") {
+    else if (ch === delimiter) {
       row.push(cell);
       cell = "";
     } else if (ch === "\n" || ch === "\r") {
@@ -44,42 +51,57 @@ function amount(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// Loop Habit Tracker's Checkmarks.csv marks each day 2 (done), 3 (skipped), or 0, 1 and -1 (not done).
-const LOOP = new Set([-1, 0, 1, 2, 3]);
+const column = (names, wanted) => names.findIndex((n) => wanted.includes(n));
 
-// Reads a table with a date column and one column per habit, or one row per entry (date, habit, value).
-// The second covers Habitify's check-in log (Habit, Date) and Streaks' export (title, entry_date, entry_type,
+// One row per entry: Habitify's check-in log (Habit, Date) and Streaks' export (title, entry_date, entry_type,
 // quantity), where only completed entries count and skipped ones become skips.
-// Habits are matched to existing ones by name; the rest are created. Returns data to merge.
-export function fromCsv(text, data, { uid, today }) {
-  const [head, ...rows] = parseCsv(text);
-  if (!head || rows.length < 1) throw formatError();
-  const names = head.map((h) => h.toLowerCase());
-  const dateAt = names.findIndex((n) => ["date", "day", "fecha", "entry_date"].includes(n));
-  if (dateAt < 0) throw formatError();
-  const habitAt = names.findIndex((n) => ["habit", "name", "title", "hábito", "habito"].includes(n));
-  const valueAt = names.findIndex((n) => ["value", "amount", "count", "quantity", "valor"].includes(n));
-  const typeAt = names.indexOf("entry_type");
-
+function rowEntries(rows, at) {
   const entries = [];
-  if (habitAt >= 0) {
-    for (const r of rows) {
-      const type = typeAt >= 0 ? (r[typeAt] ?? "").toLowerCase() : "completed";
-      const value = valueAt >= 0 ? amount(r[valueAt] ?? "") : 1;
-      if (type.startsWith("completed")) entries.push([isoDate(r[dateAt] ?? ""), r[habitAt] ?? "", typeAt >= 0 ? value || 1 : value]);
-      else if (type.startsWith("skip")) entries.push([isoDate(r[dateAt] ?? ""), r[habitAt] ?? "", 0, true]);
-    }
-  } else {
-    for (const r of rows) head.forEach((name, i) => i !== dateAt && name && entries.push([isoDate(r[dateAt] ?? ""), name, amount(r[i] ?? "")]));
+  for (const r of rows) {
+    const entry = { date: isoDate(r[at.date] ?? ""), name: r[at.habit] ?? "" };
+    const type = at.type >= 0 ? (r[at.type] ?? "").toLowerCase() : "completed";
+    const value = at.value >= 0 ? amount(r[at.value] ?? "") : 1;
+    if (type.startsWith("completed")) entries.push({ ...entry, value: at.type >= 0 ? value || 1 : value });
+    else if (type.startsWith("skip")) entries.push({ ...entry, value: 0, skipped: true });
   }
-  const valid = entries.filter(([date, name]) => date && date <= today && name);
-  if (!valid.length) throw formatError();
-  const loop = habitAt < 0 && valid.every(([, , v]) => LOOP.has(v)) && valid.some(([, , v]) => v >= 2);
+  return entries;
+}
+
+// Loop Habit Tracker's Checkmarks.csv marks each day 2 (done), 3 (skipped), or 0, 1 and -1 (not done).
+const fromLoop = ({ value, ...entry }) => ({ ...entry, value: value === 2 ? 1 : 0, skipped: value === 3 });
+
+// One column per habit.
+function columnEntries(head, rows, dateAt, loop) {
+  const entries = [];
+  for (const r of rows) {
+    head.forEach((name, i) => {
+      if (i !== dateAt && name) entries.push({ date: isoDate(r[dateAt] ?? ""), name, value: amount(r[i] ?? "") });
+    });
+  }
+  return loop ? entries.map(fromLoop) : entries;
+}
+
+// Habits are matched to existing ones by name; the rest are created, once they have something logged.
+// `loop` says the file is Loop's, whose values are codes: nothing in the values themselves tells them from counts.
+export function fromCsv(text, data, { uid, today, loop = false }) {
+  const [head, ...rows] = parseCsv(text);
+  if (!head || !rows.length) throw formatError();
+  const names = head.map((h) => h.toLowerCase());
+  const at = {
+    date: column(names, ["date", "day", "fecha", "entry_date"]),
+    habit: column(names, ["habit", "name", "title", "hábito", "habito"]),
+    value: column(names, ["value", "amount", "count", "quantity", "valor"]),
+    type: names.indexOf("entry_type"),
+  };
+  if (at.date < 0) throw formatError();
+  const entries = (at.habit >= 0 ? rowEntries(rows, at) : columnEntries(head, rows, at.date, loop)).filter((e) => e.date && e.date <= today && e.name);
+  if (!entries.length) throw formatError();
 
   const out = emptyData();
-  const known = new Map(data.habits.map((h) => [h.name.trim().toLowerCase(), h]));
+  const known = new Map(data.habits.map((h) => [String(h.name ?? "").trim().toLowerCase(), h]));
   const made = new Map();
-  for (const [date, name, raw, skipped] of valid) {
+  for (const { date, name, value, skipped } of entries) {
+    if (!(value > 0) && !skipped) continue;
     const key = name.toLowerCase();
     let habit = known.get(key) ?? made.get(key);
     if (!habit) {
@@ -88,11 +110,10 @@ export function fromCsv(text, data, { uid, today }) {
     }
     if (made.has(key)) {
       if (date < habit.start) habit.start = date;
-      if (!loop && raw > 1) habit.type = "amount";
+      if (value > 1) habit.type = "amount";
     }
-    if (skipped || (loop && raw === 3)) (out.skips[date] ??= {})[habit.id] = 1;
-    const value = loop ? (raw === 2 ? 1 : 0) : raw;
-    if (value > 0) (out.log[date] ??= {})[habit.id] = value;
+    if (skipped) (out.skips[date] ??= {})[habit.id] = 1;
+    else (out.log[date] ??= {})[habit.id] = value;
   }
   out.habits = [...made.values()];
   return out;
@@ -110,4 +131,7 @@ export function fromJson(text) {
   return normalize(parsed);
 }
 
-export const importFile = (name, text, data, env) => (name.toLowerCase().endsWith(".json") || text.trimStart().startsWith("{") ? fromJson(text) : fromCsv(text, data, env));
+export function importFile(name, text, data, env) {
+  if (name.toLowerCase().endsWith(".json") || text.trimStart().startsWith("{")) return fromJson(text);
+  return fromCsv(text, data, { ...env, loop: /checkmarks/i.test(name) });
+}
