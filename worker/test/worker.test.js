@@ -492,10 +492,16 @@ test("the open passkey routes are limited per address", async () => {
   assert.notEqual((await call("POST", "/passkey/register", { ...from("2001:db8:1:3::1"), body: {} })).status, 429);
 });
 
-test("accounts made without a session are capped across all addresses", async () => {
+test("new passkey accounts are capped across all addresses, and refused requests do not count", async () => {
   const from = (n) => ({ headers: { "CF-Connecting-IP": `10.0.0.${n}` } });
-  for (let n = 0; n < 50; n++) assert.notEqual((await call("POST", "/passkey/register", { ...from(n), body: {} })).status, 429);
-  assert.equal((await call("POST", "/passkey/register", { ...from(50), body: {} })).status, 429);
+  const signUp = async (n) => {
+    const passkey = await newPasskey(`credential-cap-${String(n).padStart(6, "0")}`);
+    const value = (await call("POST", "/passkey/challenge", from(n))).body.challenge;
+    return call("POST", "/passkey/register", { ...from(n), body: { credentialId: passkey.id, publicKey: passkey.publicKey, clientDataJSON: clientJson("webauthn.create", value) } });
+  };
+  for (let n = 100; n < 110; n++) assert.equal((await call("POST", "/passkey/register", { ...from(n), body: {} })).status, 401);
+  for (let n = 0; n < 50; n++) assert.equal((await signUp(n)).status, 200);
+  assert.equal((await signUp(50)).status, 429);
   assert.notEqual((await register(await newPasskey(), await signIn())).status, 429);
 });
 
@@ -512,9 +518,9 @@ test("the hourly sweep removes expired rate limit rows of every address", async 
   };
   const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
   await sweep(hour);
-  assert.equal(rows(), 5);
+  assert.equal(rows(), 4);
   await sweep(hour + 3_600_000 + 60_000);
-  assert.equal(rows(), 5);
+  assert.equal(rows(), 4);
   await sweep(hour + 3_600_000);
   assert.equal(rows(), 0);
 });

@@ -26,7 +26,7 @@ const RATE_LIMITS = {
   "POST /passkey/challenge": [30, 60_000],
   "POST /passkey/session": [30, 60_000],
   "POST /passkey/register": [5, 3_600_000],
-  // Accounts made without a session, from all addresses together.
+  // New passkey accounts, from all addresses together.
   "all POST /passkey/register": [50, 3_600_000],
 };
 const P256 = { name: "ECDSA", namedCurve: "P-256" };
@@ -208,6 +208,8 @@ async function passkeyRegister(request, env) {
   const session = request.headers.get("Authorization") ? await authenticate(request, env) : null;
   if (session) requireFresh(session);
   const userId = session?.userId ?? crypto.randomUUID();
+  // Counted only once the request has passed every check, so refused ones cannot use up the cap.
+  if (!session) await limitRate(env, "all POST /passkey/register");
   if (!session) await env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${userId}`, now).run();
   await env.DB.batch([
     env.DB.prepare("INSERT INTO passkeys (credential_id, user_id, public_key, created_at) VALUES (?, ?, ?, ?)").bind(credentialId, userId, key.buffer, now),
@@ -515,7 +517,6 @@ async function route(request, env) {
   const url = new URL(request.url);
   const key = `${request.method} ${url.pathname}`;
   if (RATE_LIMITS[key]) await limitRate(env, key, `${addressKey(request.headers.get("CF-Connecting-IP") ?? "unknown")} ${key}`);
-  if (key === "POST /passkey/register" && !request.headers.get("Authorization")) await limitRate(env, `all ${key}`);
   if (OPEN_ROUTES[key]) return OPEN_ROUTES[key](request, env);
   const link = request.method === "GET" && /^\/(feed|share)\/([\w-]{16,64})(\.ics)?$/.exec(url.pathname);
   if (link) return readLink(env, link[1], link[2]);
