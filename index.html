@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f6f7f8" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1d2024" media="(prefers-color-scheme: dark)">
@@ -18,70 +18,94 @@
   <header class="topbar">
     <h1 class="brand" data-i18n="title">Habit Tracker</h1>
     <nav class="tabs" aria-label="Views" data-i18n-label="views">
-      <a class="tab" href="#today" aria-current="page" data-i18n="tabToday">Today</a>
-      <a class="tab" href="#tasks" data-i18n="tabTasks">Tasks</a>
-      <a class="tab" href="#progress" data-i18n="tabProgress">Progress</a>
-      <a class="tab" href="#habits" data-i18n="tabHabits">Habits</a>
+      <a class="tab" href="#today" aria-current="page"><svg class="icon tab-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7.5-8"/></svg><span data-i18n="tabToday">Today</span></a>
+      <a class="tab" href="#tasks"><svg class="icon tab-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4h8M6 8h8M6 12h8M2 4h1.5M2 8h1.5M2 12h1.5"/></svg><span data-i18n="tabTasks">Tasks</span></a>
+      <a class="tab" href="#progress"><svg class="icon tab-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 14V9M8 14V3M13 14V6"/></svg><span data-i18n="tabProgress">Progress</span></a>
+      <a class="tab" href="#habits"><svg class="icon tab-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 7.5a5 5 0 0 1 9-3M13 8.5a5 5 0 0 1-9 3M12.5 2v2.5H10M3.5 14v-2.5H6"/></svg><span data-i18n="tabHabits">Habits</span></a>
+      <a class="tab" href="#settings"><svg class="icon tab-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h7M12 5h2M2 11h2M7 11h7M10.5 3v4M5.5 9v4"/></svg><span data-i18n="settings">Settings</span></a>
     </nav>
     <span id="today" class="today"></span>
     <span id="sync" class="status sync" role="status"></span>
-    <button id="settingsToggle" type="button" class="btn" aria-expanded="false" aria-controls="settings" data-i18n="settings">Settings</button>
-    <select id="language" class="lang" aria-label="Language" data-i18n-label="language">
-      <option value="en">English</option>
-      <option value="es">Español</option>
-    </select>
   </header>
-
-  <section id="settings" class="settings" hidden>
-    <div class="setting">
-      <label class="field">
-        <span class="field-label" data-i18n="syncWith">Sync with</span>
-        <select id="syncMode">
-          <option value="account" data-i18n="mode_account">Account</option>
-          <option value="none" data-i18n="mode_none">This device only</option>
-        </select>
-      </label>
-      <p id="noneHint" class="hint" data-i18n="noneHint"></p>
-      <div id="accountBlock" class="setting">
-        <p id="accountHint" class="hint" data-i18n="accountHint"></p>
-        <div id="googleButton"></div>
-        <div id="passkeyButtons" class="row"></div>
-        <div id="signedIn" class="setting" hidden>
-          <p id="signedInAs"></p>
-          <p class="hint" data-i18n="signOutHint"></p>
-          <div id="accountActions" class="row"></div>
-          <div id="accountOptions" class="setting"></div>
-        </div>
-      </div>
-    </div>
-    <div id="passphraseBlock" class="setting">
-      <label class="field">
-        <span class="field-label" data-i18n="passphrase">Passphrase</span>
-        <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
-      </label>
-      <p id="passphraseHint" class="hint" data-i18n="passphraseHint"></p>
-      <label class="check">
-        <input id="remember" type="checkbox">
-        <span data-i18n="remember">Remember sign-in and passphrase on this device</span>
-      </label>
-      <div class="row">
-        <button id="syncNow" type="button" class="btn" data-i18n="syncNow">Sync now</button>
-        <button id="forget" type="button" class="btn-text btn-small" data-i18n="forget">Forget passphrase</button>
-      </div>
-      <div id="recoveryBox" class="row"></div>
-    </div>
-    <div class="row">
-      <button id="exportData" type="button" class="btn-text btn-small" data-i18n="exportData">Download my data</button>
-      <button id="importData" type="button" class="btn-text btn-small" data-i18n="importData">Import data</button>
-      <button id="calendarFile" type="button" class="btn-text btn-small" data-i18n="calendarFile">Download calendar</button>
-      <input id="importFile" type="file" accept=".json,.csv,application/json,text/csv" hidden>
-      <button id="installApp" type="button" class="btn-text btn-small" data-i18n="installApp" hidden>Install app</button>
-    </div>
-    <p id="importResult" class="hint" role="status" hidden></p>
-  </section>
 
   <div id="banner" class="banner" role="alert" hidden></div>
   <main id="view" class="work"></main>
+
+  <main id="settings" class="work" hidden>
+    <section class="lane" data-tone="muted" aria-labelledby="settingsSyncTitle">
+      <div class="lane-head"><h2 id="settingsSyncTitle" class="lane-title" data-i18n="settingsSync">Sync and account</h2></div>
+      <div class="rows setting-body">
+        <label class="field">
+          <span class="field-label" data-i18n="syncWith">Sync with</span>
+          <select id="syncMode">
+            <option value="account" data-i18n="mode_account">Account</option>
+            <option value="none" data-i18n="mode_none">This device only</option>
+          </select>
+        </label>
+        <p id="noneHint" class="hint" data-i18n="noneHint"></p>
+        <div id="accountBlock" class="setting">
+          <p id="accountHint" class="hint" data-i18n="accountHint"></p>
+          <div id="googleButton"></div>
+          <div id="passkeyButtons" class="row"></div>
+          <div id="signedIn" class="setting" hidden>
+            <p id="signedInAs"></p>
+            <p class="hint" data-i18n="signOutHint"></p>
+            <div id="accountActions" class="row"></div>
+            <div id="accountOptions" class="setting"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="passphraseBlock" class="lane" data-tone="muted" aria-labelledby="settingsEncryptionTitle">
+      <div class="lane-head"><h2 id="settingsEncryptionTitle" class="lane-title" data-i18n="settingsEncryption">Encryption</h2></div>
+      <div class="rows setting-body">
+        <label class="field">
+          <span class="field-label" data-i18n="passphrase">Passphrase</span>
+          <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
+        </label>
+        <p id="passphraseHint" class="hint" data-i18n="passphraseHint"></p>
+        <label class="check">
+          <input id="remember" type="checkbox">
+          <span data-i18n="remember">Remember sign-in and passphrase on this device</span>
+        </label>
+        <div class="row">
+          <button id="syncNow" type="button" class="btn" data-i18n="syncNow">Sync now</button>
+          <button id="forget" type="button" class="btn-text btn-small" data-i18n="forget">Forget passphrase</button>
+        </div>
+        <div id="recoveryBox" class="row"></div>
+      </div>
+    </section>
+
+    <section class="lane" data-tone="muted" aria-labelledby="settingsDataTitle">
+      <div class="lane-head"><h2 id="settingsDataTitle" class="lane-title" data-i18n="settingsData">Your data</h2></div>
+      <div class="rows setting-body">
+        <div class="row">
+          <button id="exportData" type="button" class="btn" data-i18n="exportData">Download my data</button>
+          <button id="importData" type="button" class="btn" data-i18n="importData">Import data</button>
+          <button id="calendarFile" type="button" class="btn" data-i18n="calendarFile">Download calendar</button>
+          <input id="importFile" type="file" accept=".json,.csv,application/json,text/csv" hidden>
+        </div>
+        <p id="importResult" class="hint" role="status" hidden></p>
+      </div>
+    </section>
+
+    <section class="lane" data-tone="muted" aria-labelledby="settingsAppTitle">
+      <div class="lane-head"><h2 id="settingsAppTitle" class="lane-title" data-i18n="settingsApp">App</h2></div>
+      <div class="rows setting-body">
+        <label class="field field-inline">
+          <span class="field-label" data-i18n="language">Language</span>
+          <select id="language">
+            <option value="en">English</option>
+            <option value="es">Español</option>
+          </select>
+        </label>
+        <button id="installApp" type="button" class="btn" data-i18n="installApp" hidden>Install app</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <footer class="footer"><a href="privacy.html" data-i18n="privacy">Privacy</a> · <a href="terms.html" data-i18n="terms">Terms</a></footer>
 </body>
 </html>

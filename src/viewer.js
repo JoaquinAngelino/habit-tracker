@@ -1,4 +1,4 @@
-import { $, el, mark, lane } from "./ui.js";
+import { $, el, mark, lane, heatmap, heatmapLegend } from "./ui.js";
 import { t, startLanguage, applyTranslations, streakText, LANG_KEY } from "./i18n.js";
 import { openWithKey } from "./crypto.js";
 import { readShare } from "./server.js";
@@ -24,7 +24,7 @@ function row(habit) {
         ]),
       ]),
     ]),
-    el("div", { class: "heatmap-wrap" }, [el("div", { class: "heatmap" }, habit.cells.map((lvl) => el("span", { class: "cell", "data-level": lvl ?? "none" })))]),
+    heatmap(habit.cells.map((level) => ({ level })), { label: t("heatmapLabel", { name: habit.name.trim() || t("untitled") }) }),
   ]);
 }
 
@@ -44,7 +44,8 @@ async function sharedLane(link) {
     const shared = JSON.parse(await openWithKey(await readShare(token), key));
     const [y, m, d] = shared.updated.split("-").map(Number);
     const date = new Intl.DateTimeFormat(lang, { month: "long", day: "numeric" }).format(new Date(y, m - 1, d));
-    return lane("green", shared.name || t("sharedTitle"), { count: t("sharedUpdated", { date }), tools, rows: shared.habits.map(row) });
+    const legend = heatmapLegend({ less: t("legendLess"), more: t("legendMore"), slip: t("legendSlip"), off: t("legendOff") });
+    return lane("green", shared.name || t("sharedTitle"), { count: t("sharedUpdated", { date }), tools: [legend, ...tools], rows: shared.habits.map(row) });
   } catch {
     return lane("muted", t("sharedTitle"), { tools, rows: [], empty: t("sharedGone") });
   }

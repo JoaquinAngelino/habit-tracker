@@ -1,4 +1,4 @@
-import { $, el, icon, iconButton, mark, lane } from "./ui.js";
+import { $, el, icon, iconButton, mark, lane, toast, heatmap as heatmapGrid, heatmapLegend } from "./ui.js";
 import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes } from "./lib.js";
 import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress } from "./insights.js";
 import { toIcs } from "./ics.js";
@@ -17,7 +17,7 @@ const SESSION_KEY = "ht.session";
 const EMAIL_KEY = "ht.email";
 const SECRET_KEYS = [PASS_KEY, SESSION_KEY, EMAIL_KEY];
 const MODES = ["account", "none"];
-const VIEWS = ["today", "tasks", "progress", "habits"];
+const VIEWS = ["today", "tasks", "progress", "habits", "settings"];
 const TIMER_KEY = "ht.timer";
 const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, timer: 20, avoid: 1 };
 const HEATMAP_WEEKS = 53;
@@ -44,6 +44,12 @@ const ui = {
   taskFilter: "all",
   goalDraft: null,
   noteOpen: null,
+  openHabit: null,
+  // Per habit, history shown or hidden by hand; otherwise it depends on how many habits there are.
+  statsOpen: {},
+  // Habit or task just checked off, so only its tape plays the check-off.
+  popped: null,
+  shown: null,
   weeksBack: 0,
   year: null,
   timer: loadTimer(),
@@ -199,10 +205,19 @@ function confirmButtons(label, action, repaint) {
   ];
 }
 
+const commitAll = (ops) => ops.forEach((op, i) => store.commit(op, { quiet: i < ops.length - 1 }));
+
+function undoable(text, ops, undo) {
+  commitAll(ops);
+  toast(text, { action: t("undo"), onAction: undo });
+}
+
 const firstHabitLink = () => [`${t("noHabits")} `, el("a", { href: "#habits", textContent: t("addFirst") }), "."];
 
 function setLog(habit, date, value) {
-  store.commit({ t: "log", date, id: habit.id, v: value > 0 ? value : 0 });
+  const v = value > 0 ? value : 0;
+  if (habit.type !== "avoid" && isDone(habit, v) && !isDone(habit, entry(data(), habit.id, date))) ui.popped = habit.id;
+  store.commit({ t: "log", date, id: habit.id, v });
 }
 
 function setSkip(habit, date, skipped) {
@@ -222,18 +237,19 @@ function patchTask(id, patch, opts) {
 function taskTape(task) {
   return el("button", {
     type: "button",
-    class: `tape item-tape${task.done ? " is-done" : ""}`,
+    class: `tape item-tape${task.done ? " is-done" : ""}${task.done && ui.popped === task.id ? " is-popping" : ""}`,
     "aria-pressed": String(Boolean(task.done)),
     title: t(task.done ? "markUndone" : "markDone"),
     "data-focus-key": `${task.id}:tape`,
+    "aria-label": `${t(task.done ? "tape_done" : "tape_todo")}, ${task.title.trim() || t("untitledTask")}`,
     textContent: t(task.done ? "tape_done" : "tape_todo"),
     onclick: () => toggleTask(task),
   });
 }
 
 function toggleTask(task) {
-  const ops = task.done ? reopenTask(task, data().tasks) : completeTask(task, today(), uid);
-  ops.forEach((op, i) => store.commit(op, { quiet: i < ops.length - 1 }));
+  if (!task.done) ui.popped = task.id;
+  commitAll(task.done ? reopenTask(task, data().tasks) : completeTask(task, today(), uid));
 }
 
 function stepsMark(task) {
@@ -243,7 +259,15 @@ function stepsMark(task) {
 
 function stepRows(task) {
   const save = (step, patch) => store.commit({ t: "step", task: task.id, step: { ...step, ...patch } });
-  return (task.steps ?? []).map((step) => {
+  // Put back where it was, among the steps as they are by then.
+  const restore = (step, at) => {
+    const now = data().tasks.find((x) => x.id === task.id);
+    if (!now) return;
+    const steps = (now.steps ?? []).filter((s) => s.id !== step.id);
+    steps.splice(at, 0, step);
+    store.commit({ t: "task", task: { ...now, steps } });
+  };
+  return (task.steps ?? []).map((step, at) => {
     const check = el("input", {
       type: "checkbox",
       checked: Boolean(step.done),
@@ -260,7 +284,8 @@ function stepRows(task) {
       onchange: () => save(step, { title: title.value }),
       onkeydown: (e) => e.key === "Enter" && title.blur(),
     });
-    return el("div", { class: `step${step.done ? " is-closed" : ""}` }, [check, title, iconButton("x", t("removeStep"), () => store.commit({ t: "delStep", task: task.id, id: step.id }))]);
+    const remove = () => undoable(t("stepRemoved"), [{ t: "delStep", task: task.id, id: step.id }], () => restore(step, at));
+    return el("div", { class: `step${step.done ? " is-closed" : ""}` }, [el("label", { class: "step-check" }, [check]), title, iconButton("x", t("removeStep"), remove)]);
   });
 }
 
@@ -333,9 +358,15 @@ function taskRow(task) {
         task.done ? null : textButton(t("addStep"), () => addStep(task), { small: true, plus: true }),
       ]),
     ],
-    side: el("div", { class: "item-x" }, [iconButton("x", t("deleteTask"), () => store.commit({ t: "delTask", id: task.id }))]),
+    side: el("div", { class: "item-x" }, [iconButton("x", t("deleteTask"), () => removeTasks([task.id], t("taskDeleted")))]),
     after: steps.length ? [el("div", { class: "steps" }, steps)] : [],
   });
+}
+
+// Titles are saved as they are typed, without a repaint, so what Undo puts back is read at the time.
+function removeTasks(ids, text) {
+  const removed = data().tasks.filter((x) => ids.includes(x.id));
+  undoable(text, [ids.length === 1 ? { t: "delTask", id: ids[0] } : { t: "delTasks", ids }], () => commitAll(removed.map((task) => ({ t: "task", task }))));
 }
 
 function addTask() {
@@ -362,9 +393,7 @@ function tasksView() {
     ["all", ...KINDS].map((k) => el("option", { value: k, textContent: t(k === "all" ? "filter_all" : `kind_${k}`) })),
   );
   filter.value = ui.taskFilter;
-  const clear = ui.confirm === "done"
-    ? confirmButtons(t("clearConfirm", { count: done.length }), () => store.commit({ t: "delTasks", ids: done.map((x) => x.id) }), render)
-    : [textButton(t("clearDone"), () => setConfirm("done", render), { small: true })];
+  const clear = textButton(t("clearDone"), () => removeTasks(done.map((x) => x.id), t("tasksCleared", { count: done.length })), { small: true });
   const listed = ui.allDone ? done : done.slice(0, DONE_TASKS_SHOWN);
   const more = done.length > DONE_TASKS_SHOWN
     ? textButton(t(ui.allDone ? "showFewer" : "showAll", { count: done.length }), () => {
@@ -379,7 +408,7 @@ function tasksView() {
       rows: open.map(taskRow),
       empty: ui.taskFilter === "all" ? t("tasksEmpty") : t("filterEmpty"),
     }),
-    done.length ? lane("muted", t("doneTasks"), { count: String(done.length), tools: [more, ...clear], rows: listed.map(taskRow) }) : null,
+    done.length ? lane("muted", t("doneTasks"), { count: String(done.length), tools: [more, clear], rows: listed.map(taskRow) }) : null,
   ];
 }
 
@@ -393,7 +422,7 @@ const TAPE_TONES = { slipped: " is-slip", done: " is-done", clean: " is-done", t
 
 function todayTape(habit, day, value) {
   const state = tapeState(habit, value);
-  const tone = TAPE_TONES[state];
+  const tone = TAPE_TONES[state] + (state === "done" && ui.popped === habit.id ? " is-popping" : "");
   if (isAmount(habit)) {
     const input = el("input", {
       class: "tape-input",
@@ -410,13 +439,15 @@ function todayTape(habit, day, value) {
     });
     return el("label", { class: `tape item-tape${tone}` }, [input, el("span", { class: "tape-of", textContent: `/${num(habit.target || 1)}` })]);
   }
+  const text = t(`tape_${state}`) + (value > 1 ? ` ×${value}` : "");
   return el("button", {
     type: "button",
     class: `tape item-tape${tone}`,
+    "aria-label": `${text}, ${habitName(habit)}`,
     "aria-pressed": String(state === "slipped" || state === "done"),
     title: t(TAPE_TITLES[state]),
     "data-focus-key": `${habit.id}:tape`,
-    textContent: t(`tape_${state}`) + (value > 1 ? ` ×${value}` : ""),
+    textContent: text,
     onclick: () => setLog(habit, day, value ? 0 : 1),
   });
 }
@@ -530,11 +561,26 @@ function groupLane(name, list, day) {
   const d = data();
   const done = list.filter((h) => isDone(h, entry(d, h.id, day))).length;
   const todo = list.filter((h) => h.type === "check" && !entry(d, h.id, day));
-  return lane("green", name, {
+  const log = (v) => todo.map((h) => ({ t: "log", date: day, id: h.id, v }));
+  const doAll = () => undoable(t("markedDone", { count: todo.length }), log(1), () => commitAll(log(0)));
+  return completed(lane("green", name, {
     count: t("doneCount", { done, total: list.length }),
-    tools: todo.length > 1 ? [textButton(t("doAll"), () => todo.forEach((h) => setLog(h, day, 1)), { small: true })] : [],
+    tools: todo.length > 1 ? [textButton(t("doAll"), doAll, { small: true })] : [],
     rows: list.map((h) => todayRow(h, day)),
-  });
+  }), list, done);
+}
+
+function completed(section, list, done) {
+  if (list.length && done === list.length && list.some((h) => h.id === ui.popped)) section.classList.add("just-completed");
+  return section;
+}
+
+function startRow(own, hint = null) {
+  return el("div", { class: "item onboarding" }, [
+    hint ? el("p", { class: "hint", textContent: hint }) : null,
+    el("p", {}, [`${t("startWith")} `, el("button", { type: "button", class: "btn-text btn-inline", textContent: t("createOwn"), onclick: own }), "."]),
+    el("div", { class: "chips" }, TEMPLATES.map((x) => el("button", { type: "button", class: "chip", onclick: () => addHabit(x) }, [icon("plus"), el("span", { textContent: t(`tpl_${x.key}`) })]))),
+  ]);
 }
 
 // A row of toggle buttons, as for weekdays or a 1 to 5 scale.
@@ -602,8 +648,33 @@ function dueLane(day) {
 
 function emptyToday(groups, started) {
   if (groups.length) return null;
-  if (!activeHabits().length) return firstHabitLink();
   return t(started.length ? "allOff" : "noneStarted");
+}
+
+// The heading opens the browser's date picker; the field itself stays out of sight and out of the tab order.
+function dayHeading(day, go) {
+  const now = today();
+  const title = day === now ? t("today") : fmtDay(day);
+  const picker = el("input", {
+    type: "date",
+    class: "date-shadow",
+    value: day,
+    max: now,
+    tabIndex: -1,
+    "aria-hidden": "true",
+    onchange: () => picker.value && go(picker.value > now ? now : picker.value),
+  });
+  const open = () => {
+    try {
+      picker.showPicker();
+    } catch {
+      picker.click();
+    }
+  };
+  return el("span", { class: "date-jump" }, [
+    el("button", { type: "button", class: "lane-title-btn", "aria-label": `${title}, ${t("pickDay")}`, "data-focus-key": "today:pick", onclick: open }, [title]),
+    picker,
+  ]);
 }
 
 function todayView() {
@@ -619,17 +690,21 @@ function todayView() {
     ui.day = to;
     render();
   };
+  const own = () => {
+    location.hash = "#habits";
+    addHabit();
+  };
   return [
-    lane("green", day === now ? t("today") : fmtDay(day), {
+    completed(lane("green", dayHeading(day, go), {
       count: due.length ? t("doneCount", { done, total: due.length }) : "",
       tools: [
         day !== now ? textButton(t("backToday"), () => go(now), { small: true }) : null,
         iconButton("left", t("prevDay"), () => go(addDays(day, -1))),
         iconButton("right", t("nextDay"), () => go(addDays(day, 1)), { disabled: day >= now }),
       ],
-      rows: due.filter((h) => !groupOf(h)).map((h) => todayRow(h, day)),
+      rows: activeHabits().length ? due.filter((h) => !groupOf(h)).map((h) => todayRow(h, day)) : [startRow(own)],
       empty: emptyToday(groups, started),
-    }),
+    }), due, done),
     ...groups.map((name) => groupLane(name, due.filter((h) => groupOf(h) === name), day)),
     offHabits.length ? lane("muted", t("dayOff"), { count: t("habits", { count: offHabits.length }), rows: offHabits.map((h) => todayRow(h, day)) }) : null,
     dueLane(day),
@@ -670,7 +745,7 @@ function goalRow(goal, habit) {
         status,
       ]),
     ],
-    side: el("div", { class: "item-x" }, [iconButton("x", t("removeGoal"), () => store.commit({ t: "delGoal", id: goal.id }))]),
+    side: el("div", { class: "item-x" }, [iconButton("x", t("removeGoal"), () => undoable(t("goalRemoved"), [{ t: "delGoal", id: goal.id }], () => store.commit({ t: "goal", goal })))]),
   });
 }
 
@@ -752,17 +827,16 @@ function heatmap(habit) {
   const now = today();
   const first = addDays(weekStart(now), -7 * (HEATMAP_WEEKS - 1));
   const levels = recentLevels(d, habit, now, HEATMAP_WEEKS);
-  const cells = [];
-  for (let i = 0; i < levels.length; i++) {
+  const cells = levels.map((_, i) => {
     const date = addDays(first, i);
-    const lvl = date > now ? null : levels[i] ?? "before";
-    const text = lvl == null || lvl === "before" ? "" : `${fmtDay(date)}: ${cellText(habit, entry(d, habit.id, date), lvl)}`;
-    cells.push(el("span", { class: "cell", "data-level": lvl ?? "none", title: text }));
-  }
-  return el("div", { class: "heatmap-wrap" }, [
-    el("div", { class: "heatmap", role: "img", "aria-label": t("heatmapLabel", { name: habitName(habit) }) }, cells),
-  ]);
+    const level = date > now ? null : levels[i] ?? "before";
+    const text = level == null || level === "before" ? "" : `${fmtDay(date)}: ${cellText(habit, entry(d, habit.id, date), level)}`;
+    return { level, text };
+  });
+  return heatmapGrid(cells, { label: t("heatmapLabel", { name: habitName(habit) }), hint: t("heatmapHint") });
 }
+
+const legend = () => heatmapLegend({ less: t("legendLess"), more: t("legendMore"), slip: t("legendSlip"), off: t("legendOff") });
 
 function weekdayBars(habit) {
   const rates = remember(habit, "weekdayBars", () => weekdayPattern(data(), habit, today()));
@@ -873,16 +947,31 @@ function yearLane() {
   });
 }
 
-function statsRow(habit) {
-  const s = streakOf(habit);
+function habitKind(habit) {
   let kind = t(`type_${habit.type}`);
   if (habit.type === "weekly") kind += ` · ${t("perWeek", { count: habit.target })}`;
   if (habit.type === "monthly") kind += ` · ${t("perMonth", { count: habit.target })}`;
   if (isAmount(habit)) kind += ` · ${t("perDayUnit", { count: num(habit.target), unit: unitOf(habit) })}`;
+  return kind;
+}
+
+function statsRow(habit, open) {
+  const s = streakOf(habit);
+  const history = el("button", {
+    type: "button",
+    class: "btn-text btn-small",
+    "aria-expanded": String(open),
+    "data-focus-key": `${habit.id}:history`,
+    textContent: t(open ? "hideHistory" : "showHistory"),
+    onclick: () => {
+      ui.statsOpen[habit.id] = !open;
+      render();
+    },
+  });
   return itemRow({
     id: habit.id,
     tape: el("span", { class: `tape item-tape${s.current ? " is-done" : ""}`, title: habitStreakText(habit, s), textContent: t(`short_${s.unit}`, { count: s.current }) }),
-    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, [mark(kind), textButton(t("share"), () => streakCard(habit), { small: true })])],
+    body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, [mark(habitKind(habit)), textButton(t("share"), () => streakCard(habit), { small: true }), history])],
     after: [
       el("dl", { class: "stats" }, [
         stat(t(habit.type === "avoid" ? "cleanLabel" : "streakLabel"), units(s.current, s.unit)),
@@ -891,8 +980,7 @@ function statsRow(habit) {
         stat(t("last30"), percent(rateOf(habit, 30))),
         stat(t("last90"), percent(rateOf(habit, 90))),
       ]),
-      weekdayBars(habit),
-      heatmap(habit),
+      ...(open ? [weekdayBars(habit), heatmap(habit)] : []),
     ],
   });
 }
@@ -909,15 +997,20 @@ function progressView() {
   const goals = data().goals.filter((g) => byId.has(g.habitId));
   const rows = goals.map((g) => goalRow(g, byId.get(g.habitId)));
   if (ui.goalDraft && active.length) rows.push(goalForm(active));
+  const historyOpen = (h) => ui.statsOpen[h.id] ?? active.length <= 3;
   return [
+    active.length ? weekLane(active) : null,
     lane("purple", t("goals"), {
       count: goals.length ? t("goals", { count: goals.length }) : "",
       tools: active.length && !ui.goalDraft ? [textButton(t("addGoal"), () => startGoal(active), { plus: true })] : [],
       rows,
       empty: active.length ? t("noGoals") : t("addHabitFirst"),
     }),
-    active.length ? weekLane(active) : null,
-    lane("blue", t("stats"), { rows: active.map(statsRow), empty: firstHabitLink() }),
+    lane("blue", t("stats"), {
+      tools: active.some(historyOpen) ? [legend()] : [],
+      rows: active.map((h) => statsRow(h, historyOpen(h))),
+      empty: firstHabitLink(),
+    }),
     active.length ? patternsLane(active) : null,
     habits().length ? yearLane() : null,
   ];
@@ -934,6 +1027,7 @@ function addHabit(template) {
     });
   }
   ui.focus = `${habit.id}:name`;
+  ui.openHabit = habit.id;
   store.commit({ t: "habit", habit });
 }
 
@@ -959,12 +1053,13 @@ function scheduleFields(habit, patch) {
   const mode = habit.every > 1 ? "every" : habit.days?.length ? "days" : "daily";
   const select = el(
     "select",
-    { class: "pill-select", "aria-label": t("schedule"), "data-focus-key": `${habit.id}:schedule`, onchange: () => patch(SCHEDULES[select.value]()) },
+    { class: "pill-select", "data-focus-key": `${habit.id}:schedule`, onchange: () => patch(SCHEDULES[select.value]()) },
     Object.keys(SCHEDULES).map((k) => el("option", { value: k, textContent: t(`schedule_${k}`) })),
   );
   select.value = mode;
-  if (mode === "days") return [select, dayPicker(habit, patch)];
-  if (mode === "daily") return [select];
+  const repeats = labelled(t("schedule"), select);
+  if (mode === "days") return [repeats, dayPicker(habit, patch)];
+  if (mode === "daily") return [repeats];
   const every = el("input", {
     type: "number",
     class: "num-input",
@@ -976,7 +1071,7 @@ function scheduleFields(habit, patch) {
     "data-focus-key": `${habit.id}:every`,
     onchange: () => patch({ every: Math.max(2, Math.round(Number(every.value)) || 2) }),
   });
-  return [select, el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("everyN") }), every, el("span", { class: "meta-label", textContent: t("daysWord") })])];
+  return [repeats, el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("everyN") }), every, el("span", { class: "meta-label", textContent: t("daysWord") })])];
 }
 
 const peersOf = (habit) => habits().filter((h) => Boolean(h.archived) === Boolean(habit.archived));
@@ -994,13 +1089,56 @@ function moveHabit(habit, step) {
   store.commit({ t: "order", ids });
 }
 
+function scheduleText(habit) {
+  if (habit.every > 1) return `${t("everyN")} ${habit.every} ${t("daysWord")}`;
+  if (habit.days?.length) return habit.days.map((i) => weekdayName(i, "short")).join(" ");
+  return t("schedule_daily");
+}
+
+function habitSummary(habit) {
+  return el("p", { class: "item-marks" }, [
+    mark(habitKind(habit)),
+    canSchedule(habit) ? mark(scheduleText(habit)) : null,
+    habit.time ? mark(habit.time) : null,
+    groupOf(habit) ? mark(groupOf(habit)) : null,
+  ]);
+}
+
+const labelled = (label, input, after = "") =>
+  el("label", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: label }), input, after ? el("span", { class: "meta-label", textContent: after }) : null]);
+
 function editRow(habit) {
+  const open = ui.openHabit === habit.id;
   const patch = (p, opts) => patchHabit(habit.id, p, opts);
+  const peers = peersOf(habit);
+  const at = peers.findIndex((h) => h.id === habit.id);
+  const editorId = `habit-${habit.id}`;
+  const toggle = el("button", {
+    type: "button",
+    class: "habit-toggle",
+    "aria-expanded": String(open),
+    "aria-controls": open ? editorId : null,
+    "data-focus-key": `${habit.id}:toggle`,
+    onclick: () => {
+      ui.openHabit = open ? null : habit.id;
+      ui.confirm = null;
+      render();
+    },
+  }, [el("span", { class: "item-title", textContent: habitName(habit) }), icon(open ? "up" : "down")]);
+  const head = el("div", { class: "edit-row" }, [
+    toggle,
+    el("div", { class: "item-actions" }, [
+      habit.archived ? textButton(t("restore"), () => patch({ archived: false }), { small: true }) : null,
+      iconButton("up", t("moveUp"), () => moveHabit(habit, -1), { disabled: at === 0, "data-focus-key": `${habit.id}:up` }),
+      iconButton("down", t("moveDown"), () => moveHabit(habit, 1), { disabled: at === peers.length - 1, "data-focus-key": `${habit.id}:down` }),
+    ]),
+  ]);
+  if (!open) return el("article", { class: "item", "data-id": habit.id }, [head, habitSummary(habit)]);
+
   const name = el("input", {
-    class: "title-input",
+    class: "name-input",
     value: habit.name,
     placeholder: t("namePlaceholder"),
-    "aria-label": t("habitName"),
     "data-focus-key": `${habit.id}:name`,
     oninput: () => patch({ name: name.value }, { quiet: true }),
     onchange: () => render(),
@@ -1008,11 +1146,11 @@ function editRow(habit) {
   });
   const type = el(
     "select",
-    { class: "pill-select", "aria-label": t("type"), "data-focus-key": `${habit.id}:type`, onchange: () => patch({ type: type.value, target: DEFAULT_TARGET[type.value] }) },
+    { class: "pill-select", "data-focus-key": `${habit.id}:type`, onchange: () => patch({ type: type.value, target: DEFAULT_TARGET[type.value] }) },
     TYPES.map((k) => el("option", { value: k, textContent: t(`type_${k}`) })),
   );
   type.value = habit.type;
-  const fields = [type];
+  const fields = [labelled(t("type"), type)];
   if (habit.type !== "check" && habit.type !== "avoid") {
     const target = el("input", {
       type: "number",
@@ -1021,68 +1159,72 @@ function editRow(habit) {
       step: "any",
       inputMode: "decimal",
       value: habit.target,
-      "aria-label": t("target"),
       "data-focus-key": `${habit.id}:target`,
       onchange: () => patch({ target: Number(target.value) > 0 ? Number(target.value) : 1 }),
     });
-    fields.push(el("span", { class: "meta-group" }, [target, el("span", { class: "meta-label", textContent: t({ weekly: "timesWeek", monthly: "timesMonth", amount: "aDay", timer: "minDay" }[habit.type]) })]));
+    fields.push(labelled(t("target"), target, t({ weekly: "timesWeek", monthly: "timesMonth", amount: "aDay", timer: "minDay" }[habit.type])));
   }
   if (habit.type === "amount") {
     const unit = el("input", {
       class: "unit-input",
       value: habit.unit,
       placeholder: t("unitPlaceholder"),
-      "aria-label": t("unit"),
       "data-focus-key": `${habit.id}:unit`,
       oninput: () => patch({ unit: unit.value }, { quiet: true }),
     });
-    fields.push(unit);
+    fields.push(labelled(t("unit"), unit));
   }
   const start = el("input", {
     type: "date",
     value: habit.start,
     max: today(),
-    "aria-label": t("startDate"),
     "data-focus-key": `${habit.id}:start`,
     onchange: () => start.value && patch({ start: start.value }),
   });
-  fields.push(el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("since") }), start]));
+  fields.push(labelled(t("since"), start));
   const time = el("input", {
     type: "time",
     value: habit.time ?? "",
-    "aria-label": t("timeOfDay"),
     "data-focus-key": `${habit.id}:time`,
     onchange: () => patch({ time: time.value }),
   });
-  fields.push(el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t("at") }), time]));
+  fields.push(labelled(t("at"), time));
   if (canSchedule(habit)) fields.push(...scheduleFields(habit, patch));
   const group = el("input", {
     class: "unit-input",
     value: habit.group ?? "",
     placeholder: t("groupPlaceholder"),
-    "aria-label": t("group"),
     "data-focus-key": `${habit.id}:group`,
     oninput: () => patch({ group: group.value }, { quiet: true }),
     onchange: () => render(),
   });
   // `list` is read-only as a property.
   group.setAttribute("list", "groups");
-  fields.push(group);
-  const peers = peersOf(habit);
-  const at = peers.findIndex((h) => h.id === habit.id);
+  fields.push(labelled(t("group"), group));
 
+  const archive = () => {
+    const now = data().habits.find((h) => h.id === habit.id);
+    ui.openHabit = null;
+    undoable(t("archivedName", { name: habitName(now) }), [{ t: "habit", habit: { ...now, archived: true } }], () => patchHabit(habit.id, { archived: false }));
+  };
+  const remove = () => {
+    ui.openHabit = null;
+    store.commit({ t: "delHabit", id: habit.id });
+  };
   const confirmKey = `habit:${habit.id}`;
   const actions = ui.confirm === confirmKey
-    ? confirmButtons(t("deleteConfirm"), () => store.commit({ t: "delHabit", id: habit.id }), render)
+    ? confirmButtons(t("deleteConfirm", { name: habitName(habit) }), remove, render)
     : [
-      iconButton("up", t("moveUp"), () => moveHabit(habit, -1), { disabled: at === 0, "data-focus-key": `${habit.id}:up` }),
-      iconButton("down", t("moveDown"), () => moveHabit(habit, 1), { disabled: at === peers.length - 1, "data-focus-key": `${habit.id}:down` }),
-      textButton(t(habit.archived ? "restore" : "archive"), () => patch({ archived: !habit.archived }), { small: true }),
-      iconButton("x", t("deleteHabit"), () => setConfirm(confirmKey, render)),
+      habit.archived ? null : textButton(t("archive"), archive, { small: true }),
+      textButton(t("deleteHabit"), () => setConfirm(confirmKey, render), { small: true, danger: true }),
     ];
-  return el("article", { class: "item", "data-id": habit.id }, [
-    el("div", { class: "edit-row" }, [name, el("div", { class: "item-actions" }, actions)]),
-    el("div", { class: "item-meta" }, fields),
+  return el("article", { class: "item is-open", "data-id": habit.id }, [
+    head,
+    el("div", { class: "habit-editor", id: editorId }, [
+      labelled(t("habitName"), name),
+      el("div", { class: "item-meta" }, fields),
+      el("div", { class: "row" }, actions),
+    ]),
   ]);
 }
 
@@ -1112,7 +1254,7 @@ function breakRow(item) {
   return el("article", { class: "item", "data-id": item.id }, [
     el("div", { class: "edit-row" }, [
       el("div", { class: "item-meta" }, [who, date("from", "breakFrom", "breakStarts"), date("to", "breakTo", "breakEnds"), item.from <= today() && today() <= item.to ? mark(t("onBreak"), "yellow") : null]),
-      el("div", { class: "item-actions" }, [iconButton("x", t("removeBreak"), () => store.commit({ t: "delBreak", id: item.id }))]),
+      el("div", { class: "item-actions" }, [iconButton("x", t("removeBreak"), () => undoable(t("breakRemoved"), [{ t: "delBreak", id: item.id }], () => store.commit({ t: "break", break: item })))]),
     ]),
   ]);
 }
@@ -1143,9 +1285,8 @@ function habitsView() {
     el("datalist", { id: "groups" }, [...new Set(habits().map(groupOf).filter(Boolean))].map((name) => el("option", { value: name }))),
     lane("yellow", t("habits"), {
       count: current.length ? t("habits", { count: current.length }) : "",
-      tools: [templatePicker(), textButton(t("addHabit"), () => addHabit(), { plus: true })],
-      rows: current.map(editRow),
-      empty: t("habitsEmpty"),
+      tools: [current.length ? templatePicker() : null, textButton(t("addHabit"), () => addHabit(), { plus: true })],
+      rows: current.length ? current.map(editRow) : [startRow(() => addHabit(), t("habitsEmpty"))],
     }),
     habits().length ? lane("blue", t("breaks"), { tools: [textButton(t("addBreak"), addBreak, { plus: true })], rows: breaks.map(breakRow), empty: t("breaksEmpty") }) : null,
     archived.length ? lane("muted", t("archived"), { count: t("habits", { count: archived.length }), rows: archived.map(editRow) }) : null,
@@ -1162,6 +1303,18 @@ function render() {
   }
   $("#today").textContent = fmtDay(today(), { weekday: "long", month: "long", day: "numeric" });
 
+  // Settings are painted on the way in only: repainting while open would drop what is being typed there.
+  const inSettings = view === "settings";
+  $("#view").hidden = inSettings;
+  $("#settings").hidden = !inSettings;
+  const entering = inSettings && ui.shown !== "settings";
+  ui.shown = view;
+  if (inSettings) {
+    ui.popped = null;
+    if (entering) paintSettings();
+    return;
+  }
+
   const active = document.activeElement;
   const jump = Boolean(ui.focus);
   const focus = ui.focus ?? active?.dataset?.focusKey;
@@ -1171,6 +1324,7 @@ function render() {
 
   const builders = { today: todayView, tasks: tasksView, progress: progressView, habits: habitsView };
   $("#view").replaceChildren(...builders[view]().filter(Boolean));
+  ui.popped = null;
   for (const wrap of document.querySelectorAll(".heatmap-wrap")) wrap.scrollLeft = wrap.scrollWidth;
 
   const node = focus && document.querySelector(`[data-focus-key="${CSS.escape(focus)}"]`);
@@ -1609,15 +1763,6 @@ function paintSettings() {
 }
 
 function initSettings() {
-  const panel = $("#settings");
-  const toggle = $("#settingsToggle");
-  const setOpen = (open) => {
-    panel.hidden = !open;
-    toggle.setAttribute("aria-expanded", String(open));
-    if (open) paintSettings();
-  };
-  toggle.addEventListener("click", () => setOpen(panel.hidden));
-
   const passphrase = $("#passphrase");
   const remember = $("#remember");
   passphrase.value = secret(PASS_KEY);
@@ -1656,7 +1801,20 @@ function initSettings() {
   initInstall();
 
   paintSettings();
-  setOpen(settings.mode !== "none" && !config().ready);
+  // An account that cannot sync yet opens on its settings, unless the address asked for a view.
+  if (settings.mode !== "none" && !config().ready && !location.hash) history.replaceState(null, "", "#settings");
+}
+
+// Arrow keys step through the days on Today, unless focus is somewhere they already mean something.
+function stepDays(e) {
+  if (currentView() !== "today" || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.defaultPrevented) return;
+  if (e.target.closest?.("input, select, textarea, [contenteditable], [role=group]")) return;
+  const now = today();
+  if (e.key === "ArrowLeft") ui.day = addDays(ui.day, -1);
+  else if (e.key === "ArrowRight" && ui.day < now) ui.day = addDays(ui.day, 1);
+  else return;
+  e.preventDefault();
+  render();
 }
 
 // Only browsers that fire beforeinstallprompt can install from a button; the rest use their own menu.
@@ -1683,6 +1841,7 @@ tellWorker();
 $("#language").addEventListener("change", (e) => changeLanguage(e.target.value));
 applyTranslations();
 initSettings();
+document.addEventListener("keydown", stepDays);
 window.addEventListener("hashchange", () => {
   ui.confirm = null;
   render();
