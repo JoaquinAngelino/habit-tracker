@@ -1,13 +1,11 @@
-import { $, el, mark } from "./ui.js";
-import { t, setLanguage, applyTranslations, streakText } from "./i18n.js";
+import { $, el, mark, lane } from "./ui.js";
+import { t, startLanguage, applyTranslations, streakText, LANG_KEY } from "./i18n.js";
 import { openWithKey } from "./crypto.js";
 import { readShare } from "./server.js";
 import { local, read, write } from "./storage.js";
 
-// The page a share link opens. The key after the dot never leaves the browser: it is in the part of the address servers do not get.
 const FOLLOWING_KEY = "ht.following";
-const lang = setLanguage(read(local, "ht.lang") || (navigator.language?.startsWith("es") ? "es" : "en"));
-document.documentElement.lang = lang;
+const lang = startLanguage(read(local, LANG_KEY));
 applyTranslations();
 
 const percent = (r) => (r == null ? "–" : new Intl.NumberFormat(lang, { style: "percent" }).format(r));
@@ -38,20 +36,17 @@ function follow(next) {
   location.hash = next.join(",");
 }
 
-async function lane(link) {
+// The key after the dot stays in the address's fragment, which servers never receive.
+async function sharedLane(link) {
   const [token, key] = link.split(".");
-  const head = (title, count) => el("div", { class: "lane-head" }, [
-    el("h2", { class: "lane-title", textContent: title }),
-    count ? el("span", { class: "lane-count", textContent: count }) : null,
-    links().length > 1 ? el("span", { class: "lane-tools" }, [el("button", { type: "button", class: "btn-text btn-small", textContent: t("sharedRemove"), onclick: () => follow(links().filter((x) => x !== link)) })]) : null,
-  ]);
+  const tools = links().length > 1 ? [el("button", { type: "button", class: "btn-text btn-small", textContent: t("sharedRemove"), onclick: () => follow(links().filter((x) => x !== link)) })] : [];
   try {
     const shared = JSON.parse(await openWithKey(await readShare(token), key));
     const [y, m, d] = shared.updated.split("-").map(Number);
     const date = new Intl.DateTimeFormat(lang, { month: "long", day: "numeric" }).format(new Date(y, m - 1, d));
-    return el("section", { class: "lane", "data-tone": "green" }, [head(shared.name || t("sharedTitle"), t("sharedUpdated", { date })), el("div", { class: "rows" }, shared.habits.map(row))]);
+    return lane("green", shared.name || t("sharedTitle"), { count: t("sharedUpdated", { date }), tools, rows: shared.habits.map(row) });
   } catch {
-    return el("section", { class: "lane", "data-tone": "muted" }, [head(t("sharedTitle")), el("div", { class: "rows" }, [el("p", { class: "lane-empty", textContent: t("sharedGone") })])]);
+    return lane("muted", t("sharedTitle"), { tools, rows: [], empty: t("sharedGone") });
   }
 }
 
@@ -61,14 +56,13 @@ function followBox() {
     const [link] = parse(input.value.trim().split("#").pop());
     if (link && !links().includes(link)) follow([...links(), link]);
   };
-  return el("section", { class: "lane", "data-tone": "blue" }, [
-    el("div", { class: "lane-head" }, [el("h2", { class: "lane-title", textContent: t("sharedFollow") })]),
-    el("div", { class: "rows" }, [el("div", { class: "item" }, [el("p", { class: "hint", textContent: t("sharedFollowHint") }), el("div", { class: "row" }, [input, el("button", { type: "button", class: "btn", textContent: t("sharedAdd"), onclick: add })])])]),
-  ]);
+  return lane("blue", t("sharedFollow"), {
+    rows: [el("div", { class: "item" }, [el("p", { class: "hint", textContent: t("sharedFollowHint") }), el("div", { class: "row" }, [input, el("button", { type: "button", class: "btn", textContent: t("sharedAdd"), onclick: add })])])],
+  });
 }
 
 async function render() {
-  $("#view").replaceChildren(...(await Promise.all(links().map(lane))), followBox());
+  $("#view").replaceChildren(...(await Promise.all(links().map(sharedLane))), followBox());
 }
 
 // A link just opened joins the ones this browser already follows.

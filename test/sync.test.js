@@ -217,6 +217,20 @@ test("a wrong passphrase reports an error and never overwrites the data", async 
   assert.equal(server.env.DB.sql.prepare("SELECT version FROM vaults").get().version, before);
 });
 
+test("a passphrase let through by a sync with nothing new is not taken as opening the data", async () => {
+  const server = await fakeServer();
+  const session = await server.sessionFor("g1");
+  let passphrase = "correct horse battery staple";
+  const statuses = [];
+  const store = createStore({ config: () => ({ mode: "account", target: "account:g1", ready: true, session, passphrase }), onChange: () => {}, onStatus: (state) => statuses.push(state) });
+  store.commit({ t: "habit", habit });
+  await store.sync();
+  assert.equal(await store.opens(), true);
+  passphrase = "a wrong guess";
+  await store.sync();
+  assert.deepEqual([statuses.at(-1), await store.opens()], ["synced", false]);
+});
+
 test("a save refused because the data changed is retried on top of the newer data", async () => {
   const server = await fakeServer();
   const a = accountDevice(await server.sessionFor("g1"));

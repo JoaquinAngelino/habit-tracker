@@ -1,4 +1,4 @@
-import { addDays, canSchedule, isScheduled } from "./lib.js";
+import { addDays, canSchedule, isScheduled, everyFrom } from "./lib.js";
 
 const BYDAY = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 const compact = (iso) => iso.replaceAll("-", "");
@@ -45,7 +45,7 @@ function rule(habit) {
 // The first day the rule lands on, which a calendar needs as the event's start.
 function firstDay(habit) {
   if (!canSchedule(habit)) return habit.start;
-  const checked = { ...habit, days: weekdays(habit), every: interval(habit), everyFrom: isDate(habit.everyFrom) ? habit.everyFrom : habit.start };
+  const checked = { ...habit, days: weekdays(habit), every: interval(habit), everyFrom: isDate(everyFrom(habit)) ? everyFrom(habit) : habit.start };
   let d = habit.start;
   while (!isScheduled(checked, d)) d = addDays(d, 1);
   return d;

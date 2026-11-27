@@ -41,3 +41,15 @@ export function icon(name) {
 export function iconButton(name, label, onclick, extra = {}) {
   return el("button", { type: "button", class: "icon-btn", title: label, "aria-label": label, onclick, ...extra }, [icon(name)]);
 }
+
+// No empty text: only the heading shows.
+export function lane(tone, title, { count = "", tools = [], rows, empty }) {
+  return el("section", { class: "lane", "data-tone": tone }, [
+    el("div", { class: "lane-head" }, [
+      el("h2", { class: "lane-title", textContent: title }),
+      count ? el("span", { class: "lane-count", textContent: count }) : null,
+      el("span", { class: "lane-tools" }, tools),
+    ]),
+    el("div", { class: "rows" }, rows.length || empty == null ? rows : [el("p", { class: "lane-empty" }, [].concat(empty))]),
+  ]);
+}

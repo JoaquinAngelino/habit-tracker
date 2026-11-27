@@ -217,9 +217,9 @@ export const STRINGS = {
     doAll: "Mark all done",
     onBreak: "On a break",
     schedule: "Repeats",
-    repeat_daily: "Every day",
-    repeat_days: "Some days",
-    repeat_every: "Every few days",
+    schedule_daily: "Every day",
+    schedule_days: "Some days",
+    schedule_every: "Every few days",
     everyN: "every",
     daysWord: "days",
     interval: "Days between",
@@ -273,10 +273,10 @@ export const STRINGS = {
     nextYear: "Next year",
     yearEmpty: "Nothing logged this year.",
     taskRepeat: "Repeat",
-    every_none: "Once",
-    every_daily: "Daily",
-    every_weekly: "Weekly",
-    every_monthly: "Monthly",
+    repeat_none: "Once",
+    repeat_daily: "Daily",
+    repeat_weekly: "Weekly",
+    repeat_monthly: "Monthly",
     addStep: "Add step",
     stepPlaceholder: "Step",
     stepDone: "Step done",
@@ -304,14 +304,15 @@ export const STRINGS = {
     shareToggle: "Share progress with a link",
     shareHint: "Anyone with this link sees the streaks and recent days of the habits ticked below, and nothing else. It is encrypted with a key only the link holds.",
     remindToggle: "Remind me at each habit's time",
-    remindHint: "Sends a notification every day at the times set on your habits, days off included. The server learns the times, not the habits.",
+    remindHint: "Sends a notification at the times set on your habits, on the weekdays they are due, skipped days and breaks included. The server learns the times and weekdays, not the habits.",
+    remindBody: "Time for your habits.",
     errNotify: "Notifications are blocked for this site.",
     sharedTitle: "Shared progress",
     sharedUpdated: "Updated {date}",
     sharedGone: "This link no longer works.",
     errFreshSignIn: "That needs a fresh sign-in. Sync, sign out and in again, then try within 10 minutes.",
     removePasskeys: "Remove passkeys",
-    noPasskeys: "This account has no passkeys.",
+    removeOtherPasskeys: "Remove other passkeys",
     passkeysRemoved_one: "Removed 1 passkey and signed out your other devices.",
     passkeysRemoved_other: "Removed {count} passkeys and signed out your other devices.",
     shareName: "Your name on the shared page",
@@ -538,9 +539,9 @@ export const STRINGS = {
     doAll: "Marcar todo",
     onBreak: "En pausa",
     schedule: "Repetición",
-    repeat_daily: "Todos los días",
-    repeat_days: "Algunos días",
-    repeat_every: "Cada varios días",
+    schedule_daily: "Todos los días",
+    schedule_days: "Algunos días",
+    schedule_every: "Cada varios días",
     everyN: "cada",
     daysWord: "días",
     interval: "Días entre uno y otro",
@@ -594,10 +595,10 @@ export const STRINGS = {
     nextYear: "Año siguiente",
     yearEmpty: "Nada registrado este año.",
     taskRepeat: "Repetir",
-    every_none: "Una vez",
-    every_daily: "Diaria",
-    every_weekly: "Semanal",
-    every_monthly: "Mensual",
+    repeat_none: "Una vez",
+    repeat_daily: "Diaria",
+    repeat_weekly: "Semanal",
+    repeat_monthly: "Mensual",
     addStep: "Agregar paso",
     stepPlaceholder: "Paso",
     stepDone: "Paso hecho",
@@ -625,14 +626,15 @@ export const STRINGS = {
     shareToggle: "Compartir el progreso con un enlace",
     shareHint: "Cualquiera con este enlace ve las rachas y los días recientes de los hábitos marcados abajo, y nada más. Está cifrado con una clave que solo tiene el enlace.",
     remindToggle: "Recordarme a la hora de cada hábito",
-    remindHint: "Envía una notificación todos los días a las horas puestas en tus hábitos, incluso en días libres. El servidor conoce las horas, no los hábitos.",
+    remindHint: "Envía una notificación a las horas puestas en tus hábitos, los días de la semana que tocan, incluso en días omitidos y pausas. El servidor conoce las horas y los días, no los hábitos.",
+    remindBody: "Es hora de tus hábitos.",
     errNotify: "Las notificaciones están bloqueadas para este sitio.",
     sharedTitle: "Progreso compartido",
     sharedUpdated: "Actualizado el {date}",
     sharedGone: "Este enlace ya no funciona.",
     errFreshSignIn: "Eso necesita un inicio de sesión reciente. Sincronizá, cerrá la sesión, volvé a iniciarla e intentalo dentro de los 10 minutos.",
     removePasskeys: "Quitar llaves de acceso",
-    noPasskeys: "Esta cuenta no tiene llaves de acceso.",
+    removeOtherPasskeys: "Quitar las otras llaves de acceso",
     passkeysRemoved_one: "Se quitó 1 llave de acceso y se cerró la sesión en tus otros dispositivos.",
     passkeysRemoved_other: "Se quitaron {count} llaves de acceso y se cerró la sesión en tus otros dispositivos.",
     shareName: "Tu nombre en la página compartida",
@@ -645,6 +647,8 @@ export const STRINGS = {
 
 let current = "en";
 
+export const LANG_KEY = "ht.lang";
+
 export function setLanguage(lang) {
   current = STRINGS[lang] ? lang : "en";
   if (typeof document !== "undefined") document.documentElement.lang = current;
@@ -652,6 +656,9 @@ export function setLanguage(lang) {
 }
 
 export const getLanguage = () => current;
+
+// The saved language, else Spanish for a Spanish browser.
+export const startLanguage = (saved) => setLanguage(saved || (globalThis.navigator?.language?.startsWith("es") ? "es" : "en"));
 
 // With a `count`, keys that have `_one`/`_other` forms pick the matching one.
 export function t(key, vars = {}) {
@@ -670,10 +677,6 @@ export function streakText(avoid, s) {
 export function applyTranslations() {
   document.querySelectorAll("[data-i18n]").forEach((node) => {
     node.textContent = t(node.dataset.i18n);
-  });
-  // Only for hints written in this file, never for user input.
-  document.querySelectorAll("[data-i18n-html]").forEach((node) => {
-    node.innerHTML = t(node.dataset.i18nHtml);
   });
   document.querySelectorAll("[data-i18n-label]").forEach((node) => {
     node.setAttribute("aria-label", t(node.dataset.i18nLabel));

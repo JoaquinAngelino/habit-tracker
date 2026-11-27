@@ -1,4 +1,4 @@
--- An account made with a passkey has no Google ID; its users.google_sub holds 'passkey:' and the credential ID,
+-- An account made with a passkey has no Google ID; its users.google_sub holds 'passkey:' and an ID of its own,
 -- which keeps the column's NOT NULL and UNIQUE without rebuilding a table other tables point at.
 CREATE TABLE passkeys (
   credential_id TEXT PRIMARY KEY,

@@ -58,12 +58,12 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// A reminder arrives with no text, so the server never holds any. The app leaves its language where this can read it.
+// A reminder arrives with no text, so the server never holds any. The app leaves the wording where this can read it.
 async function remind() {
-  const saved = await (await caches.open("habit-tracker-settings")).match("lang");
-  const es = ((await saved?.text()) ?? self.navigator.language ?? "").startsWith("es");
-  return self.registration.showNotification(es ? "Mis hábitos" : "Habit Tracker", {
-    body: es ? "Es hora de tus hábitos." : "Time for your habits.",
+  const saved = await (await caches.open("habit-tracker-settings")).match("notification");
+  const { title, body } = (await saved?.json().catch(() => null)) ?? { title: "Habit Tracker", body: "Time for your habits." };
+  return self.registration.showNotification(title, {
+    body,
     icon: "icons/icon-192.png",
     tag: "habits",
   });

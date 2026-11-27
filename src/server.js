@@ -19,14 +19,17 @@ async function fail(res, session) {
   throw new HttpError(res.status, json.error || res.statusText, code(res.status, session));
 }
 
-async function call(path, { method = "GET", session, body } = {}) {
+// JSON both ways, unless `bytes` are sent or the response is wanted `raw`.
+async function call(path, { method = "GET", session, body, bytes, raw = Boolean(bytes) } = {}) {
+  const type = bytes ? "application/octet-stream" : body && "application/json";
   const res = await fetch(API + path, {
     method,
     cache: "no-store",
-    headers: { ...auth(session), ...(body && { "Content-Type": "application/json" }) },
-    body: body && JSON.stringify(body),
+    headers: { ...auth(session), ...(type && { "Content-Type": type }) },
+    body: bytes ?? (body && JSON.stringify(body)),
   });
   if (!res.ok) await fail(res, session);
+  if (raw) return res;
   return res.status === 204 ? {} : res.json();
 }
 
@@ -45,21 +48,16 @@ export const removePasskeys = (session) => call("/passkeys", { method: "DELETE",
 export const passkeySignIn = (body) => call("/passkey/session", { method: "POST", body });
 export const setReminders = (session, endpoint, minutes) => call("/reminders", { method: "PUT", session, body: { endpoint, minutes } });
 
-async function sendBytes(path, { method = "GET", session, body } = {}) {
-  const res = await fetch(API + path, { method, cache: "no-store", headers: { ...auth(session), ...(body && { "Content-Type": "application/octet-stream" }) }, body });
-  if (!res.ok) await fail(res, session);
-  return res;
-}
-const readBytes = async (path, session) => new Uint8Array(await (await sendBytes(path, { session })).arrayBuffer());
+const readBytes = async (path, session) => new Uint8Array(await (await call(path, { session, raw: true })).arrayBuffer());
 
 // `kind` is "feed" or "share". Publishing keeps the address; updating one that was taken down fails with 404.
 export const publishedLinks = (session) => call("/links", { session });
-export const publishLink = async (kind, session, body) => (await sendBytes(`/link/${kind}`, { method: "POST", session, body })).json();
-export const updateLink = async (kind, session, body) => (await sendBytes(`/link/${kind}`, { method: "PUT", session, body })).json();
+export const publishLink = async (kind, session, body) => (await call(`/link/${kind}`, { method: "POST", session, bytes: body })).json();
+export const updateLink = async (kind, session, body) => (await call(`/link/${kind}`, { method: "PUT", session, bytes: body })).json();
 export const removeLink = (kind, session) => call(`/link/${kind}`, { method: "DELETE", session });
 export const feedUrl = (token) => `${API}/feed/${token}.ics`;
 export const readShare = (token) => readBytes(`/share/${token}`);
-export const saveRecovery = async (session, body) => void (await sendBytes("/recovery", { method: "PUT", session, body }));
+export const saveRecovery = async (session, body) => void (await call("/recovery", { method: "PUT", session, bytes: body }));
 export const readRecovery = (session) => readBytes("/recovery", session);
 
 const file = async (res) => ({ version: res.headers.get("X-Version"), bytes: new Uint8Array(await res.arrayBuffer()) });

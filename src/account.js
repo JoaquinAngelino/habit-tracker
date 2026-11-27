@@ -1,20 +1,10 @@
 import { toB64url, fromB64url } from "./crypto.js";
 import { VAPID_PUBLIC_KEY, passkeyChallenge, passkeyRegister, passkeySignIn, setReminders } from "./server.js";
 
-// Local times of day, as "HH:MM", in minutes of the UTC day. They shift with daylight saving, so they are sent again on each visit.
-export function utcMinutes(times, now = new Date()) {
-  const minutes = times.map((time) => {
-    const at = new Date(now.getFullYear(), now.getMonth(), now.getDate(), +time.slice(0, 2), +time.slice(3, 5));
-    return at.getUTCHours() * 60 + at.getUTCMinutes();
-  });
-  return [...new Set(minutes)].sort((a, b) => a - b);
-}
-
 export const canRemind = () => Boolean(VAPID_PUBLIC_KEY) && "PushManager" in globalThis && "serviceWorker" in navigator;
 
 const subscription = async () => (await navigator.serviceWorker.ready).pushManager.getSubscription();
 
-// Subscribes this device to pushes at `minutes`.
 export async function setDeviceReminders(session, minutes) {
   if (Notification.permission !== "granted" && (await Notification.requestPermission()) !== "granted") {
     throw Object.assign(new Error("Notifications are blocked"), { code: "errNotify" });

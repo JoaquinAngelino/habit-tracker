@@ -1,5 +1,5 @@
-import { $, el, icon, iconButton, mark } from "./ui.js";
-import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, timerMinutes } from "./lib.js";
+import { $, el, icon, iconButton, mark, lane } from "./ui.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes } from "./lib.js";
 import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress } from "./insights.js";
 import { toIcs } from "./ics.js";
 import { importFile } from "./importer.js";
@@ -7,9 +7,9 @@ import { drawCard } from "./card.js";
 import { createStore } from "./store.js";
 import { local, session, read, write } from "./storage.js";
 import { fromB64url, wrap, unwrap, newKey, sealWithKey, newRecoveryCode, cleanCode, formatCode } from "./crypto.js";
-import { t, setLanguage, getLanguage, applyTranslations, streakText as streakWording } from "./i18n.js";
+import { t, setLanguage, startLanguage, getLanguage, applyTranslations, streakText, LANG_KEY } from "./i18n.js";
 import { GOOGLE_CLIENT_ID, signIn, signOut, deleteAccount, publishedLinks, publishLink, updateLink, removeLink, feedUrl, saveRecovery, readRecovery, passkeyCount, removePasskeys } from "./server.js";
-import { utcMinutes, canRemind, setDeviceReminders, stopDeviceReminders, createPasskey, usePasskey } from "./account.js";
+import { canRemind, setDeviceReminders, stopDeviceReminders, createPasskey, usePasskey } from "./account.js";
 
 const CONFIG_KEY = "ht.config";
 const PASS_KEY = "ht.passphrase";
@@ -17,7 +17,6 @@ const SESSION_KEY = "ht.session";
 const EMAIL_KEY = "ht.email";
 const SECRET_KEYS = [PASS_KEY, SESSION_KEY, EMAIL_KEY];
 const MODES = ["account", "none"];
-const LANG_KEY = "ht.lang";
 const VIEWS = ["today", "tasks", "progress", "habits"];
 const TIMER_KEY = "ht.timer";
 const DEFAULT_TARGET = { check: 1, weekly: 3, monthly: 8, amount: 1, timer: 20, avoid: 1 };
@@ -50,9 +49,11 @@ const ui = {
   timer: loadTimer(),
   accountNote: "",
   recovering: false,
-  // What the account has published, as the server lists it; null until asked.
+  // What the account has published and its passkeys, as the server lists them; null until asked.
   links: null,
-  publishedAt: null,
+  passkeys: null,
+  // What each published thing was last made from, so only a change is sent.
+  sent: {},
   focus: null,
   status: { state: "off", err: null },
   syncedAt: null,
@@ -91,6 +92,13 @@ function saveSecret(key, value) {
 if (settings.email) {
   saveSecret(EMAIL_KEY, settings.email);
   delete settings.email;
+  saveSettings();
+}
+// GitHub sync is gone, and its token could write to the repository.
+for (const kind of [local, session]) write(kind, "ht.token", null);
+if ("repo" in settings || "branch" in settings) {
+  delete settings.repo;
+  delete settings.branch;
   saveSettings();
 }
 
@@ -144,7 +152,7 @@ function remember(habit, name, compute) {
 }
 // For figures that read all the data: recomputed when any of it, the day or `scope` changes.
 function rememberAll(name, scope, compute) {
-  const stamp = `${store.version()}:${today()}:${scope}`;
+  const stamp = `${store.edits()}:${today()}:${scope}`;
   const hit = memo.get(name);
   if (hit?.stamp === stamp) return hit.value;
   const value = compute();
@@ -154,7 +162,7 @@ function rememberAll(name, scope, compute) {
 const streakOf = (habit) => remember(habit, "streak", () => streak(data(), habit, today()));
 const rateOf = (habit, days) => remember(habit, `rate${days}`, () => rate(data(), habit, today(), days));
 
-const streakText = (habit, s) => streakWording(habit.type === "avoid", s);
+const habitStreakText = (habit, s) => streakText(habit.type === "avoid", s);
 
 function goalUnit(habit) {
   if (isAmount(habit)) return unitOf(habit) || t("unit_total");
@@ -165,18 +173,6 @@ function textButton(label, onclick, { small = false, plus = false, danger = fals
   return el("button", { type: "button", class: `btn-text${small ? " btn-small" : ""}${danger ? " btn-danger" : ""}`, onclick }, [
     plus ? icon("plus") : null,
     el("span", { textContent: label }),
-  ]);
-}
-
-// No empty text: only the heading shows.
-function lane(tone, title, { count = "", tools = [], rows, empty }) {
-  return el("section", { class: "lane", "data-tone": tone }, [
-    el("div", { class: "lane-head" }, [
-      el("h2", { class: "lane-title", textContent: title }),
-      count ? el("span", { class: "lane-count", textContent: count }) : null,
-      el("span", { class: "lane-tools" }, tools),
-    ]),
-    el("div", { class: "rows" }, rows.length || empty == null ? rows : [el("p", { class: "lane-empty" }, [].concat(empty))]),
   ]);
 }
 
@@ -246,16 +242,14 @@ function stepsMark(task) {
 }
 
 function stepRows(task) {
-  const steps = task.steps ?? [];
-  const save = (next, opts) => patchTask(task.id, { steps: next }, opts);
-  const change = (id, patch) => steps.map((s) => (s.id === id ? { ...s, ...patch } : s));
-  return steps.map((step) => {
+  const save = (step, patch) => store.commit({ t: "step", task: task.id, step: { ...step, ...patch } });
+  return (task.steps ?? []).map((step) => {
     const check = el("input", {
       type: "checkbox",
       checked: Boolean(step.done),
       "aria-label": t("stepDone"),
       "data-focus-key": `${step.id}:done`,
-      onchange: () => save(change(step.id, { done: check.checked })),
+      onchange: () => save(step, { done: check.checked }),
     });
     const title = el("input", {
       class: "title-input",
@@ -263,17 +257,17 @@ function stepRows(task) {
       placeholder: t("stepPlaceholder"),
       "aria-label": t("stepPlaceholder"),
       "data-focus-key": `${step.id}:title`,
-      onchange: () => save(change(step.id, { title: title.value })),
+      onchange: () => save(step, { title: title.value }),
       onkeydown: (e) => e.key === "Enter" && title.blur(),
     });
-    return el("div", { class: `step${step.done ? " is-closed" : ""}` }, [check, title, iconButton("x", t("removeStep"), () => save(steps.filter((s) => s.id !== step.id)))]);
+    return el("div", { class: `step${step.done ? " is-closed" : ""}` }, [check, title, iconButton("x", t("removeStep"), () => store.commit({ t: "delStep", task: task.id, id: step.id }))]);
   });
 }
 
 function addStep(task) {
   const id = uid();
   ui.focus = `${id}:title`;
-  patchTask(task.id, { steps: [...(task.steps ?? []), { id, title: "", done: false }] });
+  store.commit({ t: "step", task: task.id, step: { id, title: "", done: false } });
 }
 
 function dueMark(task) {
@@ -289,7 +283,7 @@ function dueRow(task) {
     tape: taskTape(task),
     body: [
       el("p", { class: "item-title", textContent: task.title.trim() || t("untitledTask") }),
-      el("p", { class: "item-marks" }, [mark(t(`kind_${task.kind}`)), dueMark(task), task.repeat ? mark(t(`every_${task.repeat}`)) : null, stepsMark(task)]),
+      el("p", { class: "item-marks" }, [mark(t(`kind_${task.kind}`)), dueMark(task), task.repeat ? mark(t(`repeat_${task.repeat}`)) : null, stepsMark(task)]),
     ],
   });
 }
@@ -315,12 +309,12 @@ function taskRow(task) {
     value: task.due,
     "aria-label": t("dueDate"),
     "data-focus-key": `${task.id}:due`,
-    onchange: () => patchTask(task.id, { due: due.value }),
+    onchange: () => patchTask(task.id, rescheduled(task, due.value)),
   });
   const repeat = el(
     "select",
     { class: "pill-select", "aria-label": t("taskRepeat"), "data-focus-key": `${task.id}:repeat`, onchange: () => patchTask(task.id, { repeat: repeat.value }) },
-    REPEATS.map((k) => el("option", { value: k, textContent: t(`every_${k || "none"}`) })),
+    REPEATS.map((k) => el("option", { value: k, textContent: t(`repeat_${k || "none"}`) })),
   );
   repeat.value = REPEATS.includes(task.repeat) ? task.repeat : "";
   const steps = stepRows(task);
@@ -501,7 +495,7 @@ function todayRow(habit, day) {
   const d = data();
   const value = entry(d, habit.id, day);
   const s = streakOf(habit);
-  const marks = [habit.time ? mark(habit.time) : null, mark(streakText(habit, s), s.current ? "green" : null)];
+  const marks = [habit.time ? mark(habit.time) : null, mark(habitStreakText(habit, s), s.current ? "green" : null)];
   if (s.best > s.current) marks.push(mark(t("best", { units: units(s.best, s.unit) })));
   if (habit.type === "weekly" || habit.type === "monthly") {
     marks.push(mark(t(habit.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, habit, day), target: habit.target })));
@@ -837,8 +831,8 @@ function weekLane(active) {
   });
 }
 
-function linksLane(active) {
-  const [pairs, moods] = rememberAll("links", "", () => [correlations(data(), active, today()), moodLinks(data(), active, today())]);
+function patternsLane(active) {
+  const [pairs, moods] = rememberAll("patterns", "", () => [correlations(data(), active, today()), moodLinks(data(), active, today())]);
   const rows = [
     ...pairs.map((c) => insight(t("corrWith", { a: habitName(c.a), b: habitName(c.b), withA: percent(c.withA), withoutA: percent(c.withoutA) }))),
     ...moods.map((m) => insight(t("moodLink", { habit: habitName(m.habit), done: num(m.done), missed: num(m.missed) }))),
@@ -887,7 +881,7 @@ function statsRow(habit) {
   if (isAmount(habit)) kind += ` · ${t("perDayUnit", { count: num(habit.target), unit: unitOf(habit) })}`;
   return itemRow({
     id: habit.id,
-    tape: el("span", { class: `tape item-tape${s.current ? " is-done" : ""}`, title: streakText(habit, s), textContent: t(`short_${s.unit}`, { count: s.current }) }),
+    tape: el("span", { class: `tape item-tape${s.current ? " is-done" : ""}`, title: habitStreakText(habit, s), textContent: t(`short_${s.unit}`, { count: s.current }) }),
     body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, [mark(kind), textButton(t("share"), () => streakCard(habit), { small: true })])],
     after: [
       el("dl", { class: "stats" }, [
@@ -924,7 +918,7 @@ function progressView() {
     }),
     active.length ? weekLane(active) : null,
     lane("blue", t("stats"), { rows: active.map(statsRow), empty: firstHabitLink() }),
-    active.length ? linksLane(active) : null,
+    active.length ? patternsLane(active) : null,
     habits().length ? yearLane() : null,
   ];
 }
@@ -965,8 +959,8 @@ function scheduleFields(habit, patch) {
   const mode = habit.every > 1 ? "every" : habit.days?.length ? "days" : "daily";
   const select = el(
     "select",
-    { class: "pill-select", "aria-label": t("schedule"), "data-focus-key": `${habit.id}:repeat`, onchange: () => patch(SCHEDULES[select.value]()) },
-    Object.keys(SCHEDULES).map((k) => el("option", { value: k, textContent: t(`repeat_${k}`) })),
+    { class: "pill-select", "aria-label": t("schedule"), "data-focus-key": `${habit.id}:schedule`, onchange: () => patch(SCHEDULES[select.value]()) },
+    Object.keys(SCHEDULES).map((k) => el("option", { value: k, textContent: t(`schedule_${k}`) })),
   );
   select.value = mode;
   if (mode === "days") return [select, dayPicker(habit, patch)];
@@ -1092,33 +1086,33 @@ function editRow(habit) {
   ]);
 }
 
-function breakRow(rest) {
+function breakRow(item) {
   // Moving one end past the other drags the other along.
   const save = (patch) => {
-    const next = { ...rest, ...patch };
+    const next = { ...item, ...patch };
     if (next.to < next.from) Object.assign(next, patch.from ? { to: next.from } : { from: next.to });
     store.commit({ t: "break", break: next });
   };
   const who = el(
     "select",
-    { class: "pill-select", "aria-label": t("habit"), "data-focus-key": `${rest.id}:who`, onchange: () => save({ habitId: who.value }) },
+    { class: "pill-select", "aria-label": t("habit"), "data-focus-key": `${item.id}:who`, onchange: () => save({ habitId: who.value }) },
     [el("option", { value: "", textContent: t("allHabits") }), ...habits().filter((h) => h.type !== "avoid").map((h) => el("option", { value: h.id, textContent: habitName(h) }))],
   );
-  who.value = rest.habitId ?? "";
-  const date = (field, label, name) => {
+  who.value = item.habitId ?? "";
+  const date = (field, labelKey, ariaKey) => {
     const input = el("input", {
       type: "date",
-      value: rest[field],
-      "aria-label": t(name),
-      "data-focus-key": `${rest.id}:${field}`,
+      value: item[field],
+      "aria-label": t(ariaKey),
+      "data-focus-key": `${item.id}:${field}`,
       onchange: () => input.value && save({ [field]: input.value }),
     });
-    return el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t(label) }), input]);
+    return el("span", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: t(labelKey) }), input]);
   };
-  return el("article", { class: "item", "data-id": rest.id }, [
+  return el("article", { class: "item", "data-id": item.id }, [
     el("div", { class: "edit-row" }, [
-      el("div", { class: "item-meta" }, [who, date("from", "breakFrom", "breakStarts"), date("to", "breakTo", "breakEnds"), rest.from <= today() && today() <= rest.to ? mark(t("onBreak"), "yellow") : null]),
-      el("div", { class: "item-actions" }, [iconButton("x", t("removeBreak"), () => store.commit({ t: "delBreak", id: rest.id }))]),
+      el("div", { class: "item-meta" }, [who, date("from", "breakFrom", "breakStarts"), date("to", "breakTo", "breakEnds"), item.from <= today() && today() <= item.to ? mark(t("onBreak"), "yellow") : null]),
+      el("div", { class: "item-actions" }, [iconButton("x", t("removeBreak"), () => store.commit({ t: "delBreak", id: item.id }))]),
     ]),
   ]);
 }
@@ -1224,12 +1218,13 @@ function endSession() {
   paintSettings();
 }
 
-// The service worker words reminders, and cannot read localStorage.
-const tellWorker = (lang) => globalThis.caches?.open("habit-tracker-settings").then((cache) => cache.put("lang", new Response(lang))).catch(() => {});
+// The service worker words reminders, and can read neither localStorage nor these strings.
+const tellWorker = () =>
+  globalThis.caches?.open("habit-tracker-settings").then((cache) => cache.put("notification", Response.json({ title: t("title"), body: t("remindBody") }))).catch(() => {});
 
 function changeLanguage(lang) {
   write(local, LANG_KEY, setLanguage(lang));
-  tellWorker(lang);
+  tellWorker();
   formatters.clear();
   applyTranslations();
   paintSettings();
@@ -1252,11 +1247,13 @@ async function importData(file) {
     return;
   }
   const known = new Set(data().habits.map((h) => h.id));
+  const { log } = data();
+  const daysAdded = Object.entries(incoming.log).filter(([date, day]) => Object.keys(day).some((id) => !log[date]?.[id])).length;
   store.commit({ t: "import", data: incoming });
   // Synced, or folded into the device copy, right away: the edit holds the whole file until then.
   store.sync();
   const habitsAdded = t("importedHabits", { count: incoming.habits.filter((h) => !known.has(h.id)).length });
-  result.textContent = `${habitsAdded} ${t("importedDays", { count: Object.keys(incoming.log).length })}`;
+  result.textContent = `${habitsAdded} ${t("importedDays", { count: daysAdded })}`;
 }
 
 let googleReady = null;
@@ -1282,22 +1279,46 @@ async function renderGoogleButton() {
   window.google.accounts.id.renderButton(box, { theme: "outline", size: "large", text: "signin_with", width: 260, locale: getLanguage() });
 }
 
-// Display only: the server checks the token itself.
-const emailOf = (credential) => JSON.parse(new TextDecoder().decode(fromB64url(credential.split(".")[1]))).email ?? "";
+// Read here only to name the account on the device; the server checks the token itself.
+const claims = (credential) => JSON.parse(new TextDecoder().decode(fromB64url(credential.split(".")[1])));
 
-// However it is opened, an account is known on the device by the server's ID for it.
-function startAccount({ token, userId, email }) {
-  const sub = `id:${userId}`;
-  // Another person's passphrase must not seal this account's data.
+let accountInfo = null;
+// Another device may publish a link or add a passkey meanwhile, so the list is asked for again after this long.
+const ACCOUNT_INFO_TTL = 120_000;
+
+function forgetAccountInfo() {
+  accountInfo = null;
+  Object.assign(ui, { links: null, passkeys: null, sent: {} });
+}
+
+function loadAccountInfo() {
+  if (accountInfo && Date.now() - accountInfo.at < ACCOUNT_INFO_TTL) return accountInfo.promise;
+  const token = secret(SESSION_KEY);
+  const promise = Promise.all([publishedLinks(token), passkeyCount(token)]).then(([links, passkeys]) => Object.assign(ui, { links, passkeys }));
+  promise.catch(() => {
+    if (accountInfo?.promise === promise) accountInfo = null;
+  });
+  accountInfo = { at: Date.now(), promise };
+  return promise;
+}
+
+// However it is opened, an account is known on the device by the server's ID for it. Before the server sent
+// that ID, a device knew a Google account by its Google ID.
+function startAccount({ token, userId, googleSub, email }) {
+  const sub = userId ? `id:${userId}` : googleSub;
   if (settings.sub && settings.sub !== sub) {
-    saveSecret(PASS_KEY, "");
-    $("#passphrase").value = "";
+    if (googleSub && settings.sub === googleSub) store.rename(`account:${googleSub}`, `account:${sub}`);
+    else {
+      // Another person's passphrase must not seal this account's data.
+      saveSecret(PASS_KEY, "");
+      $("#passphrase").value = "";
+    }
   }
   settings.sub = sub;
   saveSettings();
   saveSecret(SESSION_KEY, token);
   saveSecret(EMAIL_KEY, email);
-  ui.links = null;
+  forgetAccountInfo();
   paintSettings();
   if (!secret(PASS_KEY)) $("#passphrase").focus();
   store.sync();
@@ -1305,7 +1326,8 @@ function startAccount({ token, userId, email }) {
 
 async function onCredential({ credential }) {
   try {
-    startAccount({ ...(await signIn(credential)), email: emailOf(credential) });
+    const { sub, email = "" } = claims(credential);
+    startAccount({ googleSub: sub, ...(await signIn(credential)), email });
   } catch (err) {
     showStatus("error", { code: "errSignIn", message: describe(err) });
   }
@@ -1325,40 +1347,48 @@ async function passkeyAccount(ceremony) {
 const inAccount = () => settings.mode === "account" && Boolean(secret(SESSION_KEY));
 const sharing = () => data().share ?? null;
 const shareUrl = () => `${new URL("share.html", location.href).href}#${ui.links.share}.${sharing().key}`;
-const reminderMinutes = () => utcMinutes([...new Set(activeHabits().map((h) => h.time).filter(Boolean))]);
+// The time stamp is left out, so an unchanged feed reads the same.
+const feedSource = () => toIcs(data(), new Date(0));
 const feedBody = () => new TextEncoder().encode(toIcs(data()));
+const remindSource = () => JSON.stringify(reminderTimes(activeHabits()));
 
-function shareBody() {
-  const { key, ids, name } = sharing();
+function shareText({ ids, name }) {
   const shown = activeHabits().filter((h) => ids.includes(h.id));
-  return sealWithKey(JSON.stringify(sharedProgress(data(), shown, today(), name ?? "", (h) => rateOf(h, 30))), key);
+  return JSON.stringify(sharedProgress(data(), shown, today(), name ?? "", (h) => rateOf(h, 30)));
 }
 
 // A link is brought up to date only while it is still published: a 404 means another device took it down.
 async function refreshLink(kind, body) {
   try {
-    await updateLink(kind, secret(SESSION_KEY), await body());
+    await updateLink(kind, secret(SESSION_KEY), await body);
+    return true;
   } catch (err) {
     if (err.status !== 404) throw err;
     delete ui.links[kind];
+    return false;
   }
 }
 
-// After a sync that changed something, or on a new day, what is published follows the data.
+async function sendChanged(kind, source, send) {
+  if (ui.sent[kind] === source) return;
+  await send();
+  ui.sent[kind] = source;
+}
+
+// After each sync what is published follows the data, sent only when what it is made from changed.
 async function refreshPublished() {
   if (!inAccount()) return;
-  const stamp = `${store.version()}:${today()}`;
-  if (ui.publishedAt === stamp) return;
   try {
-    ui.links ??= await publishedLinks(secret(SESSION_KEY));
+    await loadAccountInfo();
+    const share = ui.links.share && sharing();
+    const text = share && shareText(share);
     const steps = [
-      ui.links.feed && refreshLink("feed", feedBody),
-      ui.links.share && sharing() && refreshLink("share", shareBody),
-      settings.remind && canRemind() && setDeviceReminders(secret(SESSION_KEY), reminderMinutes()),
+      ui.links.feed && sendChanged("feed", feedSource(), () => refreshLink("feed", feedBody())),
+      share && sendChanged("share", `${share.key}:${text}`, () => refreshLink("share", sealWithKey(text, share.key))),
+      settings.remind && canRemind() && sendChanged("remind", remindSource(), () => setDeviceReminders(secret(SESSION_KEY), reminderTimes(activeHabits()))),
     ];
     const failed = (await Promise.allSettled(steps)).find((step) => step.status === "rejected");
     if (failed) throw failed.reason;
-    ui.publishedAt = stamp;
   } catch (err) {
     ui.accountNote = describe(err);
   }
@@ -1373,40 +1403,51 @@ async function accountAction(action) {
   } catch (err) {
     if (!dismissed(err)) ui.accountNote = err.name === "OperationError" ? t("errRecovery") : describe(err);
   }
-  saveSettings();
   paintSettings();
 }
 
-async function setShare(share) {
+// Only turning sharing on publishes a link; a change updates one still published, so a device behind cannot
+// bring back a link taken down elsewhere.
+async function setShare(share, { create = false } = {}) {
+  const text = shareText(share);
+  const body = await sealWithKey(text, share.key);
+  if (create) ui.links.share = (await publishLink("share", secret(SESSION_KEY), body)).token;
+  else if (!(await refreshLink("share", body))) return;
+  ui.sent.share = `${share.key}:${text}`;
   store.commit({ t: "share", share });
-  ui.links.share = (await publishLink("share", secret(SESSION_KEY), await shareBody())).token;
 }
 
-const PUBLISHING = {
+const TOGGLES = {
   feed: async (on) => {
-    if (on) ui.links.feed = (await publishLink("feed", secret(SESSION_KEY), feedBody())).token;
-    else {
+    if (on) {
+      ui.links.feed = (await publishLink("feed", secret(SESSION_KEY), feedBody())).token;
+      ui.sent.feed = feedSource();
+    } else {
       await removeLink("feed", secret(SESSION_KEY));
       delete ui.links.feed;
     }
   },
   share: async (on) => {
-    if (on) return setShare(sharing() ?? { key: newKey(), ids: activeHabits().map((h) => h.id), name: "" });
+    if (on) return setShare(sharing() ?? { key: newKey(), ids: activeHabits().map((h) => h.id), name: "" }, { create: true });
     await removeLink("share", secret(SESSION_KEY));
     delete ui.links.share;
     store.commit({ t: "share", share: null });
   },
   remind: async (on) => {
-    if (on) await setDeviceReminders(secret(SESSION_KEY), reminderMinutes());
+    if (on) await setDeviceReminders(secret(SESSION_KEY), reminderTimes(activeHabits()));
     else await stopDeviceReminders(secret(SESSION_KEY));
+    ui.sent.remind = on ? remindSource() : undefined;
     settings.remind = on;
+    saveSettings();
   },
 };
 
-// Only a passphrase that has just opened the data is worth a key: a mistyped one would replace the good key.
+// A sync with nothing new never decrypts, so the passphrase is checked against the data before it gets a key:
+// a mistyped one would replace the good key.
 async function makeRecovery() {
   await store.sync();
   if (ui.status.state !== "synced") return t("recoveryNeedsSync");
+  if (!(await store.opens())) return t("errPassphrase");
   const code = newRecoveryCode();
   await saveRecovery(secret(SESSION_KEY), await wrap(secret(PASS_KEY), code));
   return t("recoveryMade", { code: formatCode(code) });
@@ -1428,18 +1469,23 @@ async function useRecovery(code) {
   return t("recovered");
 }
 
+async function addPasskey() {
+  await createPasskey(secret(SESSION_KEY));
+  ui.passkeys = { ...ui.passkeys, count: ui.passkeys.count + 1 };
+  return t("passkeyAdded");
+}
+
 async function dropPasskeys() {
-  const { count } = await passkeyCount(secret(SESSION_KEY));
-  if (!count) return t("noPasskeys");
-  await removePasskeys(secret(SESSION_KEY));
-  return t("passkeysRemoved", { count });
+  const before = ui.passkeys.count;
+  ui.passkeys = { ...ui.passkeys, ...(await removePasskeys(secret(SESSION_KEY))) };
+  return t("passkeysRemoved", { count: before - ui.passkeys.count });
 }
 
 function paintPasskeyButtons() {
   $("#passkeyButtons").hidden = inAccount() || settings.mode !== "account" || !window.PublicKeyCredential;
   $("#passkeyButtons").replaceChildren(
     textButton(t("passkeySignIn"), () => passkeyAccount(usePasskey), { small: true }),
-    textButton(t("passkeyNew"), () => passkeyAccount(() => createPasskey()), { small: true }),
+    textButton(t("passkeyNew"), () => passkeyAccount(createPasskey), { small: true }),
   );
 }
 
@@ -1447,23 +1493,20 @@ function paintAccountOptions() {
   const box = $("#accountOptions");
   if (!inAccount()) return box.replaceChildren();
   if (!ui.links) {
-    publishedLinks(secret(SESSION_KEY)).then((links) => {
-      ui.links = links;
-      paintAccountOptions();
-    }, () => {});
+    loadAccountInfo().then(paintAccountOptions, () => {});
     return box.replaceChildren();
   }
   const toggle = (label, checked, onchange) => el("label", { class: "check" }, [el("input", { type: "checkbox", checked, onchange }), el("span", { textContent: label })]);
   const address = (url) => el("input", { readOnly: true, value: url, "aria-label": t("linkAddress"), onfocus: (e) => e.target.select() });
   const hint = (text) => el("p", { class: "hint", textContent: text });
-  const publish = (kind) => (e) => accountAction(() => PUBLISHING[kind](e.target.checked));
-  // Only Google sign-in sets an email, and only an account with it has another way in.
-  const hasGoogle = Boolean(secret(EMAIL_KEY));
+  const publish = (kind) => (e) => accountAction(() => TOGGLES[kind](e.target.checked));
+  // A passkey-only account keeps the passkey it is signed in with.
+  const { count, google } = ui.passkeys;
   const share = ui.links.share && sharing();
   const rows = [
     el("div", { class: "row" }, [
-      window.PublicKeyCredential ? textButton(t("addPasskey"), () => accountAction(async () => (await createPasskey(secret(SESSION_KEY))) && t("passkeyAdded")), { small: true }) : null,
-      hasGoogle ? textButton(t("removePasskeys"), () => accountAction(dropPasskeys), { small: true }) : null,
+      window.PublicKeyCredential ? textButton(t("addPasskey"), () => accountAction(addPasskey), { small: true }) : null,
+      count > (google ? 0 : 1) ? textButton(t(google ? "removePasskeys" : "removeOtherPasskeys"), () => accountAction(dropPasskeys), { small: true }) : null,
       textButton(t("newRecovery"), () => accountAction(makeRecovery), { small: true }),
     ]),
     toggle(t("feedToggle"), Boolean(ui.links.feed), publish("feed")),
@@ -1515,9 +1558,10 @@ async function signOutAccount() {
 function clearDevice() {
   ui.confirm = null;
   store.reset();
-  for (const key of [SESSION_KEY, PASS_KEY, EMAIL_KEY]) saveSecret(key, "");
+  for (const key of SECRET_KEYS) saveSecret(key, "");
   $("#passphrase").value = "";
-  Object.assign(ui, { links: null, publishedAt: null, accountNote: "" });
+  forgetAccountInfo();
+  ui.accountNote = "";
   settings.remind = false;
   settings.sub = "";
   saveSettings();
@@ -1545,7 +1589,6 @@ function paintSettings() {
   $("#noneHint").hidden = mode !== "none";
   $("#accountBlock").hidden = mode !== "account";
   $("#passphraseBlock").hidden = mode === "none";
-  $("#passphraseHint").innerHTML = t("passphraseHint");
   $("#accountHint").hidden = signedIn;
   $("#googleButton").hidden = signedIn;
   // An account's data stays on the device after its session ends, so Sign out stays reachable.
@@ -1635,9 +1678,8 @@ function initInstall() {
   });
 }
 
-const lang = setLanguage(read(local, LANG_KEY) || (navigator.language?.startsWith("es") ? "es" : "en"));
-$("#language").value = lang;
-tellWorker(lang);
+$("#language").value = startLanguage(read(local, LANG_KEY));
+tellWorker();
 $("#language").addEventListener("change", (e) => changeLanguage(e.target.value));
 applyTranslations();
 initSettings();

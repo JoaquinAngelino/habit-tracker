@@ -71,13 +71,13 @@ Data that has never synced merges into the first account it syncs with. A differ
 
 With an account, **Settings** also offers:
 
-- **Add a passkey**: a second way in to the same account. It works only within 10 minutes of signing in, and signs out the account's other devices, so a stolen session cannot quietly keep access. **Remove passkeys** takes them all off again, under the same 10-minute rule. **New account with a passkey** makes an account with no Google sign-in at all.
+- **Add a passkey**: a second way in to the same account. It works only within 10 minutes of signing in, and signs out the account's other devices, so a stolen session cannot quietly keep access. **Remove passkeys** takes them all off again, under the same 10-minute rule; an account with no Google sign-in keeps the passkey it is signed in with. **New account with a passkey** makes an account with no Google sign-in at all.
 - **Create a recovery key**: 24 characters to write down. The passphrase is encrypted with it in the browser and kept on the server, and **Forgot the passphrase?** brings it back. Without a recovery key a lost passphrase is still unrecoverable. A new key replaces the old one, and changing the passphrase needs a new key.
 - **Share progress with a link**: the streaks, 30-day rate and last 12 weeks of the habits you tick, on a page anyone with the link can open. The habits chosen and the name shown sync with your data. It is encrypted with a key that sits after the `#` of the link, which browsers do not send to servers. The page can follow several links at once, under each person's name, so a coach or a group sees everyone's progress together; the list is kept in that browser.
 - **Publish a calendar link**: an address calendar apps subscribe to, kept up to date after each sync. It is the one thing stored **unencrypted**: the server and anyone with the link can read the names and times of habits and dated tasks.
-- **Remind me at each habit's time**: a notification every day at the times set on habits, on this device. It does not follow weekdays, skips or breaks, or whether the habit is already done. The server gets the times and the browser's push address, and sends a push with no text. Shown only once the server has push keys (see [Server](#server)).
+- **Remind me at each habit's time**: a notification at the times set on habits, on the weekdays each habit is due, on this device. It does not follow skips or breaks, or whether the habit is already done. The server gets the times, the weekdays and the browser's push address, and sends a push with no text. Shown only once the server has push keys (see [Server](#server)).
 
-Links and reminders are refreshed after a sync that changed something. What is published is read from the server, so every device shows the same switches, and a link turned off on one device stays off. Signing out stops this device's reminders and leaves links published.
+Links and reminders are refreshed after a sync, when what they show changed. What is published is read from the server, so every device shows the same switches, and a link turned off on one device stays off. Signing out stops this device's reminders and leaves links published.
 
 ### Remember
 
@@ -97,7 +97,7 @@ With **Remember** on, the passphrase, sign-in and email stay in `localStorage`; 
 | `DELETE /account` | Deletes the account and its data |
 | `POST /passkey/challenge` | Returns a challenge, good once and for 5 minutes |
 | `POST /passkey/register` | Stores a passkey's public key: for a new account, or for the account of a session that began in the last 10 minutes, whose other sessions then end |
-| `GET /passkeys`, `DELETE /passkeys` | Counts an account's passkeys, and removes them all, with the same 10-minute rule, unless a passkey is its only way in |
+| `GET /passkeys`, `DELETE /passkeys` | Counts an account's passkeys and says whether it has Google sign-in, and removes them, with the same 10-minute rule: all of them, or for an account with no Google sign-in all but the one its session was opened with |
 | `POST /passkey/session` | Trades a passkey signature over a challenge for a session token |
 | `GET /links` | Lists what the account has published |
 | `POST /link/feed`, `POST /link/share` | Publishes the body at an unguessable address and returns its token; again keeps the token |
@@ -105,11 +105,11 @@ With **Remember** on, the passphrase, sign-in and email stay in `localStorage`; 
 | `DELETE /link/feed`, `DELETE /link/share` | Takes it down |
 | `GET /feed/<token>.ics`, `GET /share/<token>` | Returns it to anyone |
 | `PUT /recovery`, `GET /recovery` | Saves and returns the passphrase as encrypted by a recovery key |
-| `PUT /reminders` | Sets the minutes of the UTC day at which a push address is sent to; none removes it |
+| `PUT /reminders` | Sets the minutes of the UTC day at which a push address is sent to, each every day or on chosen UTC weekdays; none removes it |
 
 Versions are random, so a vault recreated after a deletion never matches one a device still holds, and they travel in headers so the URL, and with it the browser's cached CORS preflight, stays the same.
 
-A cron trigger runs every minute and sends a push with no body to the addresses due. Passkeys are registered without attestation, so the server takes the public key as the browser reports it; sign-in requires user verification. The passkey routes are limited per address, and an account can have reminders on five devices. Push addresses are accepted only on the browsers' own push services.
+A cron trigger runs every minute and sends a push with no body to the addresses due. Passkeys are registered without attestation, so the server takes the public key as the browser reports it; sign-in requires user verification. The passkey routes are limited per address (an IPv6 /64 counts as one), new passkey accounts to 50 an hour in all, and an account can have reminders on five devices. Push addresses are accepted only on the browsers' own push services.
 
 Reminders need a VAPID key pair: `npx web-push generate-vapid-keys`, then put the public key in `VAPID_PUBLIC_KEY` in both `wrangler.toml` and `src/server.js`, and run `npx wrangler secret put VAPID_PRIVATE_KEY`.
 

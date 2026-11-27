@@ -9,7 +9,8 @@ const decoder = new TextDecoder();
 const FORMAT = 3;
 const SALT_AT = 5;
 const IV_AT = SALT_AT + 16;
-const HEADER = IV_AT + 12;
+const IV_BYTES = 12;
+const HEADER = IV_AT + IV_BYTES;
 
 export const toB64 = (bytes) => {
   let s = "";
@@ -38,16 +39,12 @@ export async function deriveKey(passphrase, salt, iterations) {
 }
 
 export async function seal(value, key, salt, iterations) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const head = new Uint8Array(IV_AT);
+  head[0] = FORMAT;
+  new DataView(head.buffer).setUint32(1, iterations);
+  head.set(salt, SALT_AT);
   // Compressed before encrypting, since ciphertext does not compress.
-  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, await packJson(value)));
-  const out = new Uint8Array(HEADER + data.length);
-  out[0] = FORMAT;
-  new DataView(out.buffer).setUint32(1, iterations);
-  out.set(salt, SALT_AT);
-  out.set(iv, IV_AT);
-  out.set(data, HEADER);
-  return out;
+  return encrypt(key, await packJson(value), head);
 }
 
 const unrecognized = () => Object.assign(new Error("Unrecognized data file format"), { code: "errFormat" });
@@ -81,41 +78,36 @@ export async function unseal(envelope, key) {
   return envelope.v === 1 ? JSON.parse(decoder.decode(plain)) : unpackJson(plain);
 }
 
-// A short text sealed under a secret of its own: a 16-byte salt, a 12-byte IV, then AES-GCM.
+// The IV, then the AES-GCM ciphertext.
+async function encrypt(key, plain, prefix = new Uint8Array()) {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain));
+  const out = new Uint8Array(prefix.length + IV_BYTES + data.length);
+  out.set(prefix);
+  out.set(iv, prefix.length);
+  out.set(data, prefix.length + IV_BYTES);
+  return out;
+}
+
+const decrypt = async (key, bytes) =>
+  decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, IV_BYTES) }, key, bytes.slice(IV_BYTES)));
+
+// A short text sealed under a secret of its own: a 16-byte salt, then as `encrypt` leaves it.
 const WRAP_IV_AT = 16;
-const WRAP_DATA_AT = WRAP_IV_AT + 12;
 
 export async function wrap(text, secret) {
   const salt = newSalt();
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await deriveKey(secret, salt, ITERATIONS), encoder.encode(text)));
-  const out = new Uint8Array(WRAP_DATA_AT + data.length);
-  out.set(salt);
-  out.set(iv, WRAP_IV_AT);
-  out.set(data, WRAP_DATA_AT);
-  return out;
+  return encrypt(await deriveKey(secret, salt, ITERATIONS), encoder.encode(text), salt);
 }
 
-export async function unwrap(bytes, secret) {
-  const key = await deriveKey(secret, bytes.slice(0, WRAP_IV_AT), ITERATIONS);
-  return decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(WRAP_IV_AT, WRAP_DATA_AT) }, key, bytes.slice(WRAP_DATA_AT)));
-}
+export const unwrap = async (bytes, secret) => decrypt(await deriveKey(secret, bytes.slice(0, WRAP_IV_AT), ITERATIONS), bytes.slice(WRAP_IV_AT));
 
-// A share link's key is random already, so it is used as it is: a 12-byte IV, then AES-GCM.
+// A share link's key is random already, so it is used as it is.
 export const newKey = () => toB64url(crypto.getRandomValues(new Uint8Array(32)));
 const rawKey = (key) => crypto.subtle.importKey("raw", fromB64url(key), "AES-GCM", false, ["encrypt", "decrypt"]);
 
-export async function sealWithKey(text, key) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await rawKey(key), encoder.encode(text)));
-  const out = new Uint8Array(iv.length + data.length);
-  out.set(iv);
-  out.set(data, iv.length);
-  return out;
-}
-
-export const openWithKey = async (bytes, key) =>
-  decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, 12) }, await rawKey(key), bytes.slice(12)));
+export const sealWithKey = async (text, key) => encrypt(await rawKey(key), encoder.encode(text));
+export const openWithKey = async (bytes, key) => decrypt(await rawKey(key), bytes);
 
 // Letters and digits that are hard to mix up when copied by hand.
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789";

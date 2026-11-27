@@ -46,6 +46,8 @@ function loadPending() {
 }
 
 function fromSaved(saved, bytes, base) {
+  // GitHub sync is gone, so what a repository held now lives only here, like data that never synced.
+  if (saved.target?.startsWith("github:")) return { ...emptyCopy(), base: normalize(base) };
   const version = saved.version ?? saved.sha ?? null;
   return {
     target: saved.target ?? (version ? UNKNOWN_TARGET : null),
@@ -203,7 +205,7 @@ export function createStore({ config, onChange, onStatus }) {
 
   function switchTarget(cfg) {
     // Another person's account must never receive this device's data.
-    if (cfg.mode === "account" && cache.owner && cache.owner !== cfg.target) {
+    if (cache.owner && cache.owner !== cfg.target) {
       cache = { ...emptyCopy(), pending: [] };
       savePending();
       setView(replay(cache.base, []));
@@ -213,7 +215,7 @@ export function createStore({ config, onChange, onStatus }) {
     // target still holds it, and merging it would bring back whatever was deleted there since.
     Object.assign(cache, {
       target: cfg.target,
-      owner: cfg.mode === "account" ? cfg.target : cache.owner,
+      owner: cfg.target,
       merging: cache.target === null && hasData(cache.base),
       version: null,
       bytes: null,
@@ -253,7 +255,6 @@ export function createStore({ config, onChange, onStatus }) {
             version = await writeFile(cfg, bytes, version);
           } catch (err) {
             if (!err.conflict || attempt >= 4) throw err;
-            // The refusal carries the newer file.
             remote = err.current;
             continue;
           }
@@ -287,7 +288,7 @@ export function createStore({ config, onChange, onStatus }) {
   return {
     data: () => view,
     // Changes whenever the data may have.
-    version: () => edits,
+    edits: () => edits,
     // Changes whenever anything that habit's stats read may have changed.
     revision: (habitId) => `${generation}:${touched.get(habitId) ?? 0}`,
     // `quiet` skips the re-render, for fields still being typed in.
@@ -312,6 +313,25 @@ export function createStore({ config, onChange, onStatus }) {
     // Resolves once every queued save has finished.
     saved: () => saving,
     hasPending: () => cache.pending.length > 0,
+    // The same account under a new name: what the device holds stays.
+    async rename(from, to) {
+      await loading;
+      if (cache.owner === from) cache.owner = to;
+      if (cache.target === from) cache.target = to;
+      return saveCopy();
+    },
+    // Whether the passphrase opens the data last synced: a sync that finds nothing new never decrypts it.
+    async opens() {
+      await loading;
+      const envelope = cache.bytes && readEnvelope(cache.bytes);
+      if (!envelope) return false;
+      try {
+        await unseal(envelope, await keyFor(config(), envelope.salt, envelope.iterations));
+        return true;
+      } catch {
+        return false;
+      }
+    },
     // Drops everything this device holds; a sync still in flight is discarded when it returns.
     reset() {
       clearTimeout(timer);

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { emptyData, applyOp, replay, merge, normalize, streak, rate, isOff, isDone, level, addMonths, nextDue, completeTask, reopenTask, timerMinutes, recentLevels, queue, hasData } from "../src/lib.js";
-import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress, LINK_WEEKS } from "../src/insights.js";
+import { emptyData, applyOp, replay, merge, normalize, streak, rate, isOff, isDone, level, addMonths, nextDue, completeTask, reopenTask, rescheduled, timerMinutes, recentLevels, queue, hasData, reminderTimes } from "../src/lib.js";
+import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress, SHARED_WEEKS } from "../src/insights.js";
 import { toIcs } from "../src/ics.js";
 import { parseCsv, fromCsv, fromJson, importFile } from "../src/importer.js";
 
@@ -100,6 +100,22 @@ test("importing merges into what is there and replays like any edit", () => {
   assert.deepEqual(base.habits.length, 1);
 });
 
+test("an imported file never brings its share key or a __proto__ key", () => {
+  const theirs = { ...dataWith(daily), share: { key: "theirs", ids: ["h"], name: "" } };
+  const out = replay(emptyData(), [{ t: "import", data: theirs }]);
+  assert.deepEqual([out.habits.map((h) => h.id), out.share], [["h"], undefined]);
+  const parsed = fromJson('{"habits":[],"log":{"__proto__":{"x":1}},"__proto__":{"x":1}}');
+  assert.deepEqual([Object.hasOwn(parsed, "__proto__"), Object.hasOwn(parsed.log, "__proto__")], [false, false]);
+});
+
+test("the share syncs with the data: setting it, clearing it, and keeping the device's in a merge", () => {
+  const share = { key: "k", ids: ["h"], name: "Ana" };
+  const set = replay(emptyData(), [{ t: "share", share }]);
+  assert.deepEqual(set.share, share);
+  assert.equal(replay(set, [{ t: "share", share: null }]).share, undefined);
+  assert.deepEqual(merge(emptyData(), set).share, share);
+});
+
 test("importing an older backup changes nothing the data already holds", () => {
   const backup = dataWith([daily, { ...daily, id: "old", name: "Deleted since" }], { "2026-11-20": { h: 5 } });
   backup.tasks.push({ id: "t", title: "Pay rent", done: "" });
@@ -143,6 +159,25 @@ test("finishing a repeating task opens the next one with its steps to do again, 
 
   reopenTask(done, data.tasks).forEach((op) => applyOp(data, op));
   assert.deepEqual(data.tasks.map((x) => [x.id, x.done, x.repeat, x.nextId]), [["a", "", "weekly", undefined]]);
+});
+
+test("two devices finishing the same repeating task open one next task", () => {
+  const task = { id: "a", title: "x", repeat: "weekly", due: TODAY, done: "" };
+  const out = replay({ ...emptyData(), tasks: [task] }, [...completeTask(task, TODAY, () => "p"), ...completeTask(task, TODAY, () => "q")]);
+  assert.deepEqual(out.tasks.filter((x) => !x.done).map((x) => x.due), ["2026-12-01"]);
+});
+
+test("moving a repeating task to another day repeats it from that day", () => {
+  const task = { id: "a", repeat: "weekly", due: "2026-11-02", anchor: "2026-11-02", done: "" };
+  assert.equal(nextDue({ ...task, ...rescheduled(task, "2026-11-25") }, "2026-11-25"), "2026-12-02");
+  assert.deepEqual(rescheduled({ id: "b", due: "" }, TODAY), { due: TODAY });
+});
+
+test("steps ticked on two devices both stay, and a removed one goes", () => {
+  const steps = [{ id: "s1", title: "one", done: false }, { id: "s2", title: "two", done: false }];
+  const ticked = replay({ ...emptyData(), tasks: [{ id: "a", title: "x", steps }] }, steps.map((step) => ({ t: "step", task: "a", step: { ...step, done: true } })));
+  assert.deepEqual(ticked.tasks[0].steps.map((s) => s.done), [true, true]);
+  assert.deepEqual(replay(ticked, [{ t: "delStep", task: "a", id: "s1" }]).tasks[0].steps.map((s) => s.id), ["s2"]);
 });
 
 test("undoing leaves the next task alone once it was finished too", () => {
@@ -296,7 +331,7 @@ test("a share shows streaks and recent days, and nothing of notes, amounts or ta
   data.notes[TODAY] = { h: "private" };
   data.tasks.push({ id: "t", title: "private task", done: "" });
   const shared = sharedProgress(data, [daily], TODAY, "Ana", () => 0.5);
-  assert.deepEqual([shared.name, shared.habits.map((h) => [h.name, h.avoid, h.streak.current, h.rate, h.cells.length])], ["Ana", [["Read", false, 2, 0.5, LINK_WEEKS * 7]]]);
+  assert.deepEqual([shared.name, shared.habits.map((h) => [h.name, h.avoid, h.streak.current, h.rate, h.cells.length])], ["Ana", [["Read", false, 2, 0.5, SHARED_WEEKS * 7]]]);
   assert.deepEqual(shared.habits[0].cells.slice(-7), [4, 4, null, null, null, null, null]);
   assert.equal(JSON.stringify(shared).includes("private"), false);
 });
@@ -320,13 +355,15 @@ test("a share link's key opens what it sealed, and no other key does", async () 
   await assert.rejects(openWithKey(sealed, newKey()), { name: "OperationError" });
 });
 
-test("reminder times become minutes of the UTC day", async (t) => {
-  const { utcMinutes } = await import("../src/account.js");
+test("reminder times become minutes of the UTC day, on the UTC weekdays they are due", (t) => {
   const zone = process.env.TZ;
   t.after(() => (zone === undefined ? delete process.env.TZ : (process.env.TZ = zone)));
   // Five and a half hours ahead of UTC, so a wrong sign or a dropped half hour shows.
   process.env.TZ = "Asia/Kolkata";
-  assert.deepEqual(utcMinutes(["07:30", "07:30", "02:00"], new Date(2026, 10, 24, 12)), [120, 1230]);
+  const at = (time, more = {}) => ({ ...daily, time, ...more });
+  // 02:00 on a Monday here is 20:30 on Sunday in UTC, bit 0.
+  const habits = [at("07:30"), at("07:30", { days: [0] }), at("02:00", { days: [0] }), at("09:00", { days: [0], every: 2 }), at("")];
+  assert.deepEqual(reminderTimes(habits, new Date(2026, 10, 24, 12)), [120, 210, [1230, 1]]);
 });
 
 test("CSV import reads check-in logs and exports that mark each entry completed or skipped", () => {

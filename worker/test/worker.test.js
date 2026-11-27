@@ -277,24 +277,41 @@ test("a passkey added while signed in opens that same account", async () => {
   // Both ways in name the account the same, so a device does not take it for someone else's.
   const google = await call("POST", "/session", { body: { credential: await idToken() } });
   assert.equal(back.body.userId, google.body.userId);
+  assert.deepEqual([back.body.googleSub, google.body.googleSub], ["google-user-1", "google-user-1"]);
   assert.equal((await get(back.body.token)).data, "google data");
   assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM users").get().n, 1);
-  assert.equal((await call("GET", "/passkeys", { token: back.body.token })).body.count, 1);
+  assert.deepEqual((await call("GET", "/passkeys", { token: back.body.token })).body, { count: 1, google: true });
   env.DB.sql.prepare("UPDATE sessions SET created_at = ?").run(Date.now() - 11 * 60_000);
   assert.equal((await call("DELETE", "/passkeys", { token: back.body.token })).status, 403);
   assert.equal((await call("GET", "/passkeys", { token: back.body.token })).body.count, 1);
   env.DB.sql.prepare("UPDATE sessions SET created_at = ?").run(Date.now());
-  assert.equal((await call("DELETE", "/passkeys", { token: back.body.token })).status, 204);
+  const removed = await call("DELETE", "/passkeys", { token: back.body.token });
+  assert.deepEqual([removed.status, removed.body], [200, { count: 0 }]);
   assert.equal((await call("POST", "/passkey/session", { body: await assertion(passkey) })).status, 401);
 });
 
-test("a session that is not fresh cannot add a passkey, and a passkey-only account keeps its passkey", async () => {
+test("a session that is not fresh cannot add a passkey, and a passkey-only account keeps the passkey it signed in with", async () => {
   const token = await signIn();
   env.DB.sql.prepare("UPDATE sessions SET created_at = ?").run(Date.now() - 11 * 60_000);
   assert.equal((await register(await newPasskey(), token)).status, 403);
   assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM passkeys").get().n, 0);
-  const made = await register(await newPasskey("credential-only-000000"));
-  assert.equal((await call("DELETE", "/passkeys", { token: made.body.token })).status, 409);
+
+  const first = await newPasskey("credential-only-000000");
+  const second = await newPasskey("credential-only-111111");
+  const made = await register(first);
+  assert.equal(made.body.googleSub, null);
+  await register(second, made.body.token);
+  const back = await call("POST", "/passkey/session", { body: await assertion(second) });
+  assert.equal(back.body.googleSub, null);
+  assert.deepEqual((await call("GET", "/passkeys", { token: back.body.token })).body, { count: 2, google: false });
+  const removed = await call("DELETE", "/passkeys", { token: back.body.token });
+  assert.deepEqual([removed.status, removed.body], [200, { count: 1 }]);
+  assert.equal((await call("POST", "/passkey/session", { body: await assertion(first) })).status, 401);
+  const kept = await call("POST", "/passkey/session", { body: await assertion(second) });
+  assert.equal(kept.status, 200);
+  // Sessions from before sessions recorded their passkey cannot tell which one to keep.
+  env.DB.sql.exec("UPDATE sessions SET passkey_id = NULL");
+  assert.equal((await call("DELETE", "/passkeys", { token: kept.body.token })).status, 409);
 });
 
 test("passkey sign-in refuses a reused challenge, another site, a missing person, a wrong key and an unknown credential", async () => {
@@ -426,6 +443,40 @@ test("an account can have reminders on a handful of devices, and a service is si
   assert.equal(new Set(headers).size, 1);
 });
 
+test("a reminder with weekdays is pushed only on those days, and one without on every day", async () => {
+  const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  env.VAPID_PUBLIC_KEY = b64url(new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey)));
+  env.VAPID_PRIVATE_KEY = (await crypto.subtle.exportKey("jwk", keys.privateKey)).d;
+  const token = await signIn();
+  const device = (n) => `https://fcm.googleapis.com/fcm/send/${n}`;
+  const TUESDAY = 1 << 2;
+  const WEDNESDAY = 1 << 3;
+  for (const minutes of [[[60, 0]], [[60, 128]], [[60, 1.5]], [[60]], [[1440, 1]], [[60, TUESDAY, 1]]]) {
+    assert.equal((await call("PUT", "/reminders", { token, body: { endpoint: device("tue"), minutes } })).status, 400);
+  }
+  await call("PUT", "/reminders", { token, body: { endpoint: device("tue"), minutes: [[60, TUESDAY]] } });
+  await call("PUT", "/reminders", { token, body: { endpoint: device("daily"), minutes: [60] } });
+  await call("PUT", "/reminders", { token, body: { endpoint: device("both"), minutes: [[60, TUESDAY], [60, WEDNESDAY]] } });
+  assert.equal(env.DB.sql.prepare("SELECT days FROM reminders WHERE endpoint = ?").get(device("both")).days, TUESDAY | WEDNESDAY);
+
+  const sent = [];
+  const googleFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => (sent.push(url), new Response(null, { status: 201 }));
+  const tick = async (iso) => {
+    const waits = [];
+    worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => waits.push(p) });
+    await Promise.all(waits);
+    return sent.splice(0).sort();
+  };
+  try {
+    assert.deepEqual(await tick("2026-11-24T01:00:00Z"), [device("both"), device("daily"), device("tue")]);
+    assert.deepEqual(await tick("2026-11-25T01:00:00Z"), [device("both"), device("daily")]);
+    assert.deepEqual(await tick("2026-11-26T01:00:00Z"), [device("daily")]);
+  } finally {
+    globalThis.fetch = googleFetch;
+  }
+});
+
 test("the open passkey routes are limited per address", async () => {
   const from = (ip) => ({ headers: { "CF-Connecting-IP": ip } });
   for (let n = 0; n < 30; n++) assert.equal((await call("POST", "/passkey/challenge", from("1.1.1.1"))).status, 200);
@@ -433,6 +484,39 @@ test("the open passkey routes are limited per address", async () => {
   assert.equal((await call("POST", "/passkey/challenge", from("2.2.2.2"))).status, 200);
   for (let n = 0; n < 5; n++) await call("POST", "/passkey/register", { ...from("3.3.3.3"), body: {} });
   assert.equal((await call("POST", "/passkey/register", { ...from("3.3.3.3"), body: {} })).status, 429);
+  // An IPv6 /64 is one address.
+  for (const ip of ["2001:db8:1:2::1", "2001:0db8:1:2:aaaa::5", "2001:db8:1:2:0:0:0:9", "2001:db8:1:2::a:b", "2001:db8:1:2::c"]) {
+    await call("POST", "/passkey/register", { ...from(ip), body: {} });
+  }
+  assert.equal((await call("POST", "/passkey/register", { ...from("2001:db8:1:2:ffff::1"), body: {} })).status, 429);
+  assert.notEqual((await call("POST", "/passkey/register", { ...from("2001:db8:1:3::1"), body: {} })).status, 429);
+});
+
+test("accounts made without a session are capped across all addresses", async () => {
+  const from = (n) => ({ headers: { "CF-Connecting-IP": `10.0.0.${n}` } });
+  for (let n = 0; n < 50; n++) assert.notEqual((await call("POST", "/passkey/register", { ...from(n), body: {} })).status, 429);
+  assert.equal((await call("POST", "/passkey/register", { ...from(50), body: {} })).status, 429);
+  assert.notEqual((await register(await newPasskey(), await signIn())).status, 429);
+});
+
+test("the hourly sweep removes expired rate limit rows of every address", async () => {
+  for (const ip of ["1.1.1.1", "2.2.2.2"]) {
+    await call("POST", "/passkey/challenge", { headers: { "CF-Connecting-IP": ip } });
+    await call("POST", "/passkey/register", { headers: { "CF-Connecting-IP": ip }, body: {} });
+  }
+  const rows = () => env.DB.sql.prepare("SELECT COUNT(*) AS n FROM rate_limits").get().n;
+  const sweep = async (time) => {
+    const waits = [];
+    worker.scheduled({ scheduledTime: time }, env, { waitUntil: (p) => waits.push(p) });
+    await Promise.all(waits);
+  };
+  const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  await sweep(hour);
+  assert.equal(rows(), 5);
+  await sweep(hour + 3_600_000 + 60_000);
+  assert.equal(rows(), 5);
+  await sweep(hour + 3_600_000);
+  assert.equal(rows(), 0);
 });
 
 test("a passkey whose use count does not move forward is refused", async () => {

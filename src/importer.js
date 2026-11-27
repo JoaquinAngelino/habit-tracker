@@ -71,14 +71,14 @@ function rowEntries(rows, at) {
 const fromLoop = ({ value, ...entry }) => ({ ...entry, value: value === 2 ? 1 : 0, skipped: value === 3 });
 
 // One column per habit.
-function columnEntries(head, rows, dateAt, loop) {
+function columnEntries(head, rows, dateAt) {
   const entries = [];
   for (const r of rows) {
     head.forEach((name, i) => {
       if (i !== dateAt && name) entries.push({ date: isoDate(r[dateAt] ?? ""), name, value: amount(r[i] ?? "") });
     });
   }
-  return loop ? entries.map(fromLoop) : entries;
+  return entries;
 }
 
 // Habits are matched to existing ones by name; the rest are created, once they have something logged.
@@ -94,7 +94,9 @@ export function fromCsv(text, data, { uid, today, loop = false }) {
     type: names.indexOf("entry_type"),
   };
   if (at.date < 0) throw formatError();
-  const entries = (at.habit >= 0 ? rowEntries(rows, at) : columnEntries(head, rows, at.date, loop)).filter((e) => e.date && e.date <= today && e.name);
+  const columns = () => columnEntries(head, rows, at.date);
+  const read = at.habit >= 0 ? rowEntries(rows, at) : loop ? columns().map(fromLoop) : columns();
+  const entries = read.filter((e) => e.date && e.date <= today && e.name);
   if (!entries.length) throw formatError();
 
   const out = emptyData();
@@ -123,7 +125,8 @@ export function fromCsv(text, data, { uid, today, loop = false }) {
 export function fromJson(text) {
   let parsed;
   try {
-    parsed = JSON.parse(text);
+    // A "__proto__" key would reach objects that are later assigned to.
+    parsed = JSON.parse(text, (key, value) => (key === "__proto__" ? undefined : value));
   } catch {
     throw formatError();
   }

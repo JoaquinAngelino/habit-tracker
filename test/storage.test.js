@@ -77,6 +77,34 @@ test("data kept on the device merges into an account that already has data", asy
   assert.deepEqual(store.data().habits.map((h) => h.id).sort(), ["h", "o"]);
 });
 
+test("a copy from a GitHub repository merges into an account that already has data", async () => {
+  const { account } = await fakeServer();
+  const elsewhere = open(account);
+  elsewhere.commit({ t: "habit", habit: other });
+  await elsewhere.sync();
+  idb.data.clear();
+  localStorage.map.clear();
+
+  localStorage.setItem("ht.cache.v1", JSON.stringify({ target: "github:me/habits@data", sha: "abc", envelope: null, base: { habits: [habit], log: {}, goals: [], tasks: [] }, pending: [] }));
+  const store = open(account);
+  await store.sync();
+  assert.deepEqual(store.data().habits.map((h) => h.id).sort(), ["h", "o"]);
+});
+
+test("an account known by a new name keeps the device's data and unsynced edits", async () => {
+  const { account } = await fakeServer();
+  let config = account;
+  const store = open(() => config());
+  store.commit({ t: "habit", habit });
+  await store.sync();
+  store.commit({ t: "habit", habit: other });
+  await store.rename("account:g1", "account:id:u1");
+  config = () => ({ ...account(), target: "account:id:u1" });
+  await store.sync();
+  assert.deepEqual(store.data().habits.map((h) => h.id), ["h", "o"]);
+  assert.equal(store.hasPending(), false);
+});
+
 test("signing out removes the device copy from IndexedDB and localStorage", async () => {
   const store = open();
   store.commit({ t: "habit", habit });

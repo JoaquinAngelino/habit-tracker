@@ -15,6 +15,8 @@ const CHALLENGE_TTL = 5 * 60_000;
 // A stolen session must not be able to mint a way in that outlives it.
 const FRESH_SIGN_IN = 10 * 60_000;
 const MAX_REMINDERS = 48;
+const MINUTES_PER_DAY = 1440;
+const EVERY_DAY = 127;
 const MAX_REMINDER_DEVICES = 5;
 // One run stays under the worker's limit on outgoing requests.
 const MAX_REMINDED = 900;
@@ -24,6 +26,8 @@ const RATE_LIMITS = {
   "POST /passkey/challenge": [30, 60_000],
   "POST /passkey/session": [30, 60_000],
   "POST /passkey/register": [5, 3_600_000],
+  // Accounts made without a session, from all addresses together.
+  "all POST /passkey/register": [50, 3_600_000],
 };
 const P256 = { name: "ECDSA", namedCurve: "P-256" };
 const ES256 = { name: "ECDSA", hash: "SHA-256" };
@@ -109,21 +113,37 @@ async function signIn(request, env) {
     .bind(crypto.randomUUID(), sub, now)
     .run();
   const user = await env.DB.prepare("SELECT id FROM users WHERE google_sub = ?").bind(sub).first();
-  return json({ ...(await startSession(env, user.id)), userId: user.id });
+  return json({ ...(await startSession(env, user.id)), userId: user.id, googleSub: sub });
 }
 
-async function limitRate(request, env, key) {
-  const [max, every] = RATE_LIMITS[key];
-  const who = `${request.headers.get("CF-Connecting-IP") ?? "unknown"} ${key}`;
-  const slot = Math.floor(Date.now() / every);
+// Anyone can get a whole IPv6 /64, so it counts as one address.
+function addressKey(ip) {
+  if (!ip.includes(":") || ip.includes(".")) return ip;
+  const [head, tail] = ip.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+  return `${groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(":")}::/64`;
+}
+
+// `key` must end with `name`: the hourly sweep finds expired rows by that suffix.
+async function limitRate(env, name, key = name) {
+  const [max, every] = RATE_LIMITS[name];
   const { count } = await env.DB.prepare(
     "INSERT INTO rate_limits (key, slot, count) VALUES (?, ?, 1) ON CONFLICT (key, slot) DO UPDATE SET count = count + 1 RETURNING count",
-  ).bind(who, slot).first();
-  if (count === 1) await env.DB.prepare("DELETE FROM rate_limits WHERE key = ? AND slot < ?").bind(who, slot).run();
+  ).bind(key, Math.floor(Date.now() / every)).first();
   if (count > max) throw new HttpError(429, "Too many requests");
 }
 
-async function startSession(env, userId) {
+async function sweepRateLimits(env, now) {
+  await env.DB.batch(Object.entries(RATE_LIMITS).map(([name, [, every]]) =>
+    env.DB.prepare("DELETE FROM rate_limits WHERE key LIKE '%' || ? AND slot < ?").bind(name, Math.floor(now / every))));
+}
+
+const endOtherSessions = (env, userId, hash = "") => env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").bind(userId, hash);
+const googleSub = (sub) => (sub.startsWith("passkey:") ? null : sub);
+
+async function startSession(env, userId, passkeyId = null) {
   const now = Date.now();
   const token = b64url(crypto.getRandomValues(new Uint8Array(32)));
   const expiresAt = now + SESSION_TTL;
@@ -132,7 +152,7 @@ async function startSession(env, userId) {
     env.DB.prepare(
       "DELETE FROM sessions WHERE user_id = ?1 AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE user_id = ?1 ORDER BY expires_at DESC LIMIT ?2)",
     ).bind(userId, MAX_SESSIONS_PER_USER - 1),
-    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)").bind(await sha256(token), userId, expiresAt, now),
+    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at, created_at, passkey_id) VALUES (?, ?, ?, ?, ?)").bind(await sha256(token), userId, expiresAt, now, passkeyId),
   ]);
   return { token, expiresAt };
 }
@@ -188,13 +208,13 @@ async function passkeyRegister(request, env) {
   const session = request.headers.get("Authorization") ? await authenticate(request, env) : null;
   if (session) requireFresh(session);
   const userId = session?.userId ?? crypto.randomUUID();
-  if (!session) await env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${credentialId}`, now).run();
+  if (!session) await env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${userId}`, now).run();
   await env.DB.batch([
     env.DB.prepare("INSERT INTO passkeys (credential_id, user_id, public_key, created_at) VALUES (?, ?, ?, ?)").bind(credentialId, userId, key.buffer, now),
-    env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").bind(userId, session?.hash ?? ""),
+    endOtherSessions(env, userId, session?.hash),
   ]);
   if (session) return json({ userId });
-  return json({ ...(await startSession(env, userId)), userId });
+  return json({ ...(await startSession(env, userId, credentialId)), userId, googleSub: null });
 }
 
 // WebAuthn signs in DER; Web Crypto checks r and s as two 32-byte numbers.
@@ -216,7 +236,9 @@ function rawSignature(der) {
 async function passkeySignIn(request, env) {
   const { credentialId, authenticatorData, clientDataJSON, signature } = await readJson(request);
   const data = await clientData(clientDataJSON, "webauthn.get", env);
-  const passkey = await env.DB.prepare("SELECT user_id, public_key, sign_count FROM passkeys WHERE credential_id = ?").bind(String(credentialId)).first();
+  const passkey = await env.DB.prepare(
+    "SELECT user_id, public_key, sign_count, google_sub FROM passkeys JOIN users ON users.id = passkeys.user_id WHERE credential_id = ?",
+  ).bind(String(credentialId)).first();
   if (!passkey) throw invalidPasskey();
   let valid = false;
   let count = 0;
@@ -240,7 +262,7 @@ async function passkeySignIn(request, env) {
   }
   if (!valid) throw invalidPasskey();
   if (count) await env.DB.prepare("UPDATE passkeys SET sign_count = ? WHERE credential_id = ?").bind(count, String(credentialId)).run();
-  return json({ ...(await startSession(env, passkey.user_id)), userId: passkey.user_id });
+  return json({ ...(await startSession(env, passkey.user_id, String(credentialId))), userId: passkey.user_id, googleSub: googleSub(passkey.google_sub) });
 }
 
 async function authenticate(request, env) {
@@ -248,12 +270,12 @@ async function authenticate(request, env) {
   if (!token) throw new HttpError(401, "Not signed in");
   const hash = await sha256(token);
   const now = Date.now();
-  const session = await env.DB.prepare("SELECT user_id, expires_at, created_at FROM sessions WHERE token_hash = ?").bind(hash).first();
+  const session = await env.DB.prepare("SELECT user_id, expires_at, created_at, passkey_id FROM sessions WHERE token_hash = ?").bind(hash).first();
   if (!session || session.expires_at <= now) throw new HttpError(401, "Not signed in");
   if (session.expires_at < now + SESSION_TTL - SESSION_RENEW_AFTER) {
     await env.DB.prepare("UPDATE sessions SET expires_at = ? WHERE token_hash = ?").bind(now + SESSION_TTL, hash).run();
   }
-  return { userId: session.user_id, hash, createdAt: session.created_at };
+  return { userId: session.user_id, hash, createdAt: session.created_at, passkeyId: session.passkey_id };
 }
 
 const newVersion = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -298,21 +320,24 @@ async function writeVault(request, url, env, userId) {
   return current ? blob(current.envelope, current.version, 409) : json({ error: "The data changed since it was read" }, 409);
 }
 
+const countPasskeys = async (env, userId) => (await env.DB.prepare("SELECT COUNT(*) AS count FROM passkeys WHERE user_id = ?").bind(userId).first()).count;
+const hasGoogle = async (env, userId) => googleSub((await env.DB.prepare("SELECT google_sub FROM users WHERE id = ?").bind(userId).first()).google_sub) !== null;
+
 async function passkeyCount(env, userId) {
-  return json(await env.DB.prepare("SELECT COUNT(*) AS count FROM passkeys WHERE user_id = ?").bind(userId).first());
+  return json({ count: await countPasskeys(env, userId), google: await hasGoogle(env, userId) });
 }
 
-// An account made with a passkey has no other way in, so its passkeys stay.
+// A passkey-only account keeps the passkey this session was opened with, its only way in.
 async function removePasskeys(env, session) {
   requireFresh(session);
-  const { userId, hash } = session;
-  const user = await env.DB.prepare("SELECT google_sub FROM users WHERE id = ?").bind(userId).first();
-  if (user.google_sub.startsWith("passkey:")) throw new HttpError(409, "A passkey is the only way in to this account");
+  const { userId, hash, passkeyId } = session;
+  const google = await hasGoogle(env, userId);
+  if (!google && !passkeyId) throw new HttpError(409, "Sign in with a passkey to remove the others");
   await env.DB.batch([
-    env.DB.prepare("DELETE FROM passkeys WHERE user_id = ?").bind(userId),
-    env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").bind(userId, hash),
+    env.DB.prepare("DELETE FROM passkeys WHERE user_id = ? AND credential_id != ?").bind(userId, google ? "" : passkeyId),
+    endOtherSessions(env, userId, hash),
   ]);
-  return new Response(null, { status: 204 });
+  return json({ count: await countPasskeys(env, userId) });
 }
 
 async function readBody(request, max) {
@@ -378,17 +403,25 @@ function pushEndpoint(value) {
   throw new HttpError(400, "Expected a push subscription");
 }
 
-// Replaces the times a device asked for; none removes it.
+// Replaces the times a device asked for; none removes it. Each is a minute, for every day, or [minute, days]
+// where bit n of days is UTC weekday n (Sunday 0).
 async function writeReminders(request, env, userId) {
   const { endpoint, minutes } = await readJson(request);
   const url = pushEndpoint(endpoint);
-  const list = [...new Set(Array.isArray(minutes) ? minutes : [])];
-  if (list.length > MAX_REMINDERS || !list.every((m) => Number.isInteger(m) && m >= 0 && m < 1440)) throw new HttpError(400, "Expected minutes of the day");
+  const entries = Array.isArray(minutes) ? minutes : [];
+  if (entries.length > MAX_REMINDERS) throw new HttpError(400, "Too many reminders");
+  const days = new Map();
+  for (const entry of entries) {
+    const [minute, mask] = Array.isArray(entry) && entry.length === 2 ? entry : [entry, EVERY_DAY];
+    const valid = Number.isInteger(minute) && minute >= 0 && minute < MINUTES_PER_DAY && Number.isInteger(mask) && mask >= 1 && mask <= EVERY_DAY;
+    if (!valid) throw new HttpError(400, "Expected minutes of the day");
+    days.set(minute, (days.get(minute) ?? 0) | mask);
+  }
   const others = await env.DB.prepare("SELECT COUNT(DISTINCT endpoint) AS n FROM reminders WHERE user_id = ? AND endpoint != ?").bind(userId, url).first();
-  if (list.length && others.n >= MAX_REMINDER_DEVICES) throw new HttpError(400, "Too many devices have reminders");
+  if (days.size && others.n >= MAX_REMINDER_DEVICES) throw new HttpError(400, "Too many devices have reminders");
   await env.DB.batch([
     env.DB.prepare("DELETE FROM reminders WHERE endpoint = ?").bind(url),
-    ...list.map((m) => env.DB.prepare("INSERT INTO reminders (endpoint, minute, user_id) VALUES (?, ?, ?)").bind(url, m, userId)),
+    ...[...days].map(([minute, mask]) => env.DB.prepare("INSERT INTO reminders (endpoint, minute, days, user_id) VALUES (?, ?, ?, ?)").bind(url, minute, mask, userId)),
   ]);
   return new Response(null, { status: 204 });
 }
@@ -418,7 +451,11 @@ async function remind(env, now) {
   if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) return;
   const at = new Date(now);
   const minute = at.getUTCHours() * 60 + at.getUTCMinutes();
-  const { results } = await env.DB.prepare("SELECT DISTINCT endpoint FROM reminders WHERE minute = ? LIMIT ?").bind(minute, MAX_REMINDED).all();
+  // Random order, so a capped minute does not leave out the same devices every day.
+  const { results } = await env.DB.prepare("SELECT DISTINCT endpoint FROM reminders WHERE minute = ? AND (days >> ?) & 1 = 1 ORDER BY random() LIMIT ?")
+    .bind(minute, at.getUTCDay(), MAX_REMINDED)
+    .all();
+  if (results.length === MAX_REMINDED) console.warn(`Reminders at minute ${minute} hit the cap of ${MAX_REMINDED}`);
   const header = await vapidSigner(env);
   const dropped = [];
   for (let i = 0; i < results.length; i += REMIND_BATCH) {
@@ -477,7 +514,8 @@ const OPEN_ROUTES = {
 async function route(request, env) {
   const url = new URL(request.url);
   const key = `${request.method} ${url.pathname}`;
-  if (RATE_LIMITS[key]) await limitRate(request, env, key);
+  if (RATE_LIMITS[key]) await limitRate(env, key, `${addressKey(request.headers.get("CF-Connecting-IP") ?? "unknown")} ${key}`);
+  if (key === "POST /passkey/register" && !request.headers.get("Authorization")) await limitRate(env, `all ${key}`);
   if (OPEN_ROUTES[key]) return OPEN_ROUTES[key](request, env);
   const link = request.method === "GET" && /^\/(feed|share)\/([\w-]{16,64})(\.ics)?$/.exec(url.pathname);
   if (link) return readLink(env, link[1], link[2]);
@@ -512,8 +550,8 @@ export default {
     for (const [name, value] of Object.entries(cors)) response.headers.set(name, value);
     return response;
   },
-  // Runs every minute.
   scheduled(event, env, ctx) {
     ctx.waitUntil(remind(env, event.scheduledTime));
+    if (new Date(event.scheduledTime).getUTCMinutes() === 0) ctx.waitUntil(sweepRateLimits(env, event.scheduledTime));
   },
 };
