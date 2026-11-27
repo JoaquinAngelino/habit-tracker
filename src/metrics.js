@@ -1,43 +1,33 @@
-import { addDays, addMonths, daysBetween, weekStart, entry, periodsOf, lastDay } from "./lib.js";
+import { addDays, addMonths, daysBetween, earlier, mean, entry, periodsOf, countsTowardRate, lastDay, habitAt, PERIODS } from "./lib.js";
 
 export const UNITS = ["day", "week", "month", "year", "custom"];
 export const COMPARES = ["previous", "lastYear", "average", "best"];
 export const AVERAGE_OF = { day: 7, week: 4, month: 3, year: 3, custom: 3 };
-export const TREND_PERIODS = 12;
+const TREND_PERIODS = 12;
 
-const earlier = (a, b) => (a < b ? a : b);
-const leap = (year) => (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+// A year before a year is just the previous one, and a custom range has no calendar periods to pick a best from.
+export const comparesFor = (unit) => COMPARES.filter((m) => !(m === "best" && unit === "custom") && !(m === "lastYear" && unit === "year"));
 
 export function periodAround(unit, date) {
-  if (unit === "week") {
-    const from = weekStart(date);
-    return { from, to: addDays(from, 6) };
-  }
-  if (unit === "month") {
-    const from = `${date.slice(0, 7)}-01`;
-    return { from, to: addDays(addMonths(from, 1), -1) };
-  }
-  if (unit === "year") return { from: `${date.slice(0, 4)}-01-01`, to: `${date.slice(0, 4)}-12-31` };
-  return { from: date, to: date };
+  const p = PERIODS[unit];
+  const from = p.start(date);
+  return { from, to: unit === "day" ? from : addDays(p.next(from), -1) };
 }
 
 const shift = (unit, date, n) => (unit === "day" ? addDays(date, n) : unit === "week" ? addDays(date, 7 * n) : addMonths(date, (unit === "year" ? 12 : 1) * n));
-
-const withCut = (range, today) => ({ ...range, cut: earlier(range.to, today) });
-
-// A period `back` periods before the one holding today, or for "custom" the range itself. `cut` is the last day
-// counted: today, while the period is still running.
-export function rangeFor(unit, today, { back = 0, from, to } = {}) {
-  if (unit !== "custom") return withCut(periodAround(unit, shift(unit, today, -back)), today);
-  const len = daysBetween(from, to) + 1;
-  return withCut({ from: addDays(from, -len * back), to: addDays(to, -len * back) }, today);
-}
 
 function stepBack(unit, range, n = 1) {
   if (unit !== "custom") return periodAround(unit, shift(unit, range.from, -n));
   const len = daysBetween(range.from, range.to) + 1;
   return { from: addDays(range.from, -len * n), to: addDays(range.to, -len * n) };
 }
+
+const withCut = (range, today) => ({ ...range, cut: earlier(range.to, today) });
+
+// A period `back` periods before the one holding today, or for "custom" the range itself. `cut` is the last day
+// counted: today, while the period is still running.
+export const rangeFor = (unit, today, { back = 0, from, to } = {}) =>
+  withCut(stepBack(unit, unit === "custom" ? { from, to } : periodAround(unit, today), back), today);
 
 function yearBefore(unit, range) {
   if (unit === "week") return periodAround("week", addDays(range.from, -364));
@@ -49,66 +39,91 @@ function yearBefore(unit, range) {
 // the start, at most the end of `other`.
 function matchingCut(unit, range, other) {
   if (range.cut >= range.to) return other.to;
-  if (unit === "year") {
-    const year = +other.from.slice(0, 4);
-    const day = range.cut.slice(5);
-    return earlier(`${year}-${day === "02-29" && !leap(year) ? "02-28" : day}`, other.to);
-  }
+  if (unit === "year") return earlier(addMonths(range.cut, 12 * (+other.from.slice(0, 4) - +range.from.slice(0, 4))), other.to);
   return earlier(addDays(other.from, daysBetween(range.from, range.cut)), other.to);
 }
 
 // The ranges `range` is compared with. Like for like, each is cut at the same point `range` has reached;
-// otherwise each is counted whole. "best" is found from the data instead, by `bestRange`.
+// otherwise each is counted whole.
 export function comparisonRanges(unit, range, mode, { full = false } = {}) {
   let others;
-  if (mode === "lastYear") others = [unit === "year" ? stepBack(unit, range) : yearBefore(unit, range)];
+  if (mode === "lastYear") others = [yearBefore(unit, range)];
   else if (mode === "average") others = Array.from({ length: AVERAGE_OF[unit] }, (_, i) => stepBack(unit, range, i + 1));
   else others = [stepBack(unit, range)];
   return others.map((other) => ({ ...other, cut: full ? other.to : matchingCut(unit, range, other) }));
 }
 
-// For each habit, what each day of its life counted for: `due` marks a day, or the last counted day of a week or
-// month, that counts toward the rate, and `done` whether its target was met. The last day of a habit's life counts
-// only once done, except for avoid habits. `values` are what was logged.
-export function buildFacts(data, habits, today) {
-  const out = [];
-  for (const habit of habits) {
-    const end = lastDay(data, habit, today);
-    if (habit.start > end) continue;
-    const n = daysBetween(habit.start, end) + 1;
-    const fact = {
-      habit,
-      start: habit.start,
-      end,
-      due: new Uint8Array(n),
-      done: new Uint8Array(n),
-      daily: new Uint8Array(n),
-      avoid: new Uint8Array(n),
-      values: new Float64Array(n),
-    };
-    for (let i = 0, d = habit.start; i < n; i++, d = addDays(d, 1)) fact.values[i] = entry(data, habit.id, d);
-    for (const x of periodsOf(data, habit, habit.start, end)) {
-      const daily = x.start === x.end;
-      if (!x.met && (x.off || (x.end >= end && (!daily || x.rule.type !== "avoid")))) continue;
-      const i = daysBetween(habit.start, earlier(x.end, end));
-      if (i < 0) continue;
-      fact.due[i] = 1;
-      fact.done[i] = x.met ? 1 : 0;
-      fact.daily[i] = daily ? 1 : 0;
-      if (daily && x.rule.type === "avoid") fact.avoid[i] = 1;
-    }
-    out.push(fact);
+function metOn(data, rule, period) {
+  let sum = 0;
+  for (let d = period.start; d < period.end; d = addDays(d, 1)) {
+    sum += entry(data, rule.id, d);
+    if (sum >= (rule.target || 1)) return d;
   }
-  return out;
+  return period.end;
 }
 
-const mean = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
+// What each day of a habit's life counted for. `due` marks a day, or the day a week's or month's target was reached
+// (its last day when it was not), that counts toward the rate, and `done` whether it was met, so a cut-short period
+// counts the same weeks and months as the one it is compared with. A day still open and not done is `pending`.
+// `cumDue` and `cumDone` are running totals, for rates over any span without walking it.
+export function habitFacts(data, habit, today) {
+  const end = lastDay(data, habit, today);
+  if (habit.start > end) return null;
+  const n = daysBetween(habit.start, end) + 1;
+  const fact = {
+    habit,
+    start: habit.start,
+    end,
+    due: new Uint8Array(n),
+    done: new Uint8Array(n),
+    daily: new Uint8Array(n),
+    avoid: new Uint8Array(n),
+    pending: new Uint8Array(n),
+    run: new Uint16Array(n),
+    values: new Float64Array(n),
+    cumDue: new Int32Array(n + 1),
+    cumDone: new Int32Array(n + 1),
+  };
+  for (const [date, day] of Object.entries(data.log)) {
+    if (day[habit.id] && date >= habit.start && date <= end) fact.values[daysBetween(habit.start, date)] = day[habit.id];
+  }
+  for (const x of periodsOf(data, habit, habit.start, end)) {
+    const daily = x.unit === "day";
+    if (!countsTowardRate(x, end)) {
+      if (daily && !x.off) fact.pending[daysBetween(habit.start, x.start)] = 1;
+      continue;
+    }
+    const at = daily ? x.start : x.met ? metOn(data, x.rule, x) : earlier(x.end, end);
+    const i = Math.max(0, daysBetween(habit.start, at));
+    fact.due[i] = 1;
+    fact.done[i] = x.met ? 1 : 0;
+    fact.daily[i] = daily ? 1 : 0;
+    fact.avoid[i] = daily && x.rule.type === "avoid" ? 1 : 0;
+    fact.run[i] = x.run;
+  }
+  for (let i = 0; i < n; i++) {
+    fact.cumDue[i + 1] = fact.cumDue[i] + fact.due[i];
+    fact.cumDone[i + 1] = fact.cumDone[i] + fact.done[i];
+  }
+  return fact;
+}
 
-function habitFigures(fact, from, to) {
+export const buildFacts = (data, habits, today) => habits.map((h) => habitFacts(data, h, today)).filter(Boolean);
+
+function span(fact, from, to) {
   const first = Math.max(0, daysBetween(fact.start, from));
   const last = Math.min(fact.due.length - 1, daysBetween(fact.start, to));
-  const row = { habit: fact.habit, due: 0, done: 0, total: 0, bestDay: 0, dailyDue: 0, slips: 0, clean: 0, longest: 0, daysLogged: 0 };
-  let run = 0;
+  const empty = last < first;
+  return { first, last, due: empty ? 0 : fact.cumDue[last + 1] - fact.cumDue[first], done: empty ? 0 : fact.cumDone[last + 1] - fact.cumDone[first] };
+}
+
+// The longest run counts daily, non-avoid days only, so it is always a number of days, and starts again where the
+// habit's type changed.
+function habitFigures(fact, from, to) {
+  const { first, last } = span(fact, from, to);
+  const row = { habit: fact.habit, rule: habitAt(fact.habit, earlier(to, fact.end)), due: 0, done: 0, total: 0, dueTotal: 0, bestDay: 0, dailyDue: 0, slips: 0, clean: 0, longest: 0, daysLogged: 0 };
+  let count = 0;
+  let run = -1;
   for (let i = first; i <= last; i++) {
     const v = fact.values[i];
     if (fact.avoid[i]) {
@@ -120,25 +135,32 @@ function habitFigures(fact, from, to) {
     }
     if (!fact.due[i]) continue;
     row.due++;
-    if (fact.daily[i]) row.dailyDue++;
-    if (fact.done[i]) {
-      row.done++;
-      if (fact.avoid[i]) row.clean++;
-      run++;
-      row.longest = Math.max(row.longest, run);
-    } else run = 0;
+    if (fact.done[i]) row.done++;
+    if (fact.avoid[i]) {
+      if (fact.done[i]) row.clean++;
+      count = 0;
+    } else if (fact.daily[i]) {
+      row.dailyDue++;
+      row.dueTotal += v;
+      if (fact.run[i] !== run) count = 0;
+      run = fact.run[i];
+      count = fact.done[i] ? count + 1 : 0;
+      row.longest = Math.max(row.longest, count);
+    } else count = 0;
   }
   row.rate = row.due ? row.done / row.due : null;
-  row.average = row.dailyDue ? row.total / row.dailyDue : null;
+  row.average = row.dailyDue ? row.dueTotal / row.dailyDue : null;
   return { row, first, last };
 }
 
-// What a range adds up to, from `from` to `cut`. Habits whose life misses the range are left out.
+// What a range adds up to, from `from` to `cut`. A day is perfect when everything due was done and nothing is
+// still pending.
 export function measure(data, facts, { from, cut }) {
-  const len = daysBetween(from, cut) + 1;
-  const dueOn = new Int16Array(Math.max(0, len));
-  const doneOn = new Int16Array(Math.max(0, len));
-  const activeOn = new Uint8Array(Math.max(0, len));
+  const len = Math.max(0, daysBetween(from, cut) + 1);
+  const dueOn = new Int16Array(len);
+  const doneOn = new Int16Array(len);
+  const pendingOn = new Uint8Array(len);
+  const activeOn = new Uint8Array(len);
   const rows = [];
   for (const fact of facts) {
     if (fact.start > cut || fact.end < from) continue;
@@ -146,6 +168,7 @@ export function measure(data, facts, { from, cut }) {
     const offset = daysBetween(from, fact.start);
     for (let i = first; i <= last; i++) {
       if (fact.values[i] && !fact.avoid[i]) activeOn[i + offset] = 1;
+      if (fact.pending[i]) pendingOn[i + offset] = 1;
       if (!fact.due[i] || !fact.daily[i] || fact.avoid[i]) continue;
       dueOn[i + offset]++;
       if (fact.done[i]) doneOn[i + offset]++;
@@ -156,7 +179,7 @@ export function measure(data, facts, { from, cut }) {
   let perfectDays = 0;
   let activeDays = 0;
   for (let i = 0; i < len; i++) {
-    if (dueOn[i] && doneOn[i] === dueOn[i]) perfectDays++;
+    if (dueOn[i] && doneOn[i] === dueOn[i] && !pendingOn[i]) perfectDays++;
     if (activeOn[i]) activeDays++;
   }
   const moods = [];
@@ -170,7 +193,7 @@ export function measure(data, facts, { from, cut }) {
   const done = sum("done");
   const doneTasks = data.tasks.filter((x) => x.done && x.done >= from && x.done <= cut);
   const dated = doneTasks.filter((x) => x.due);
-  const longest = rows.filter((r) => r.habit.type !== "avoid").sort((a, b) => b.longest - a.longest)[0];
+  const longest = [...rows].sort((a, b) => b.longest - a.longest)[0];
   const top = [...rows].sort((a, b) => b.daysLogged - a.daysLogged)[0];
   return {
     from,
@@ -193,14 +216,15 @@ export function measure(data, facts, { from, cut }) {
   };
 }
 
-export const KPIS = ["rate", "done", "perfectDays", "activeDays", "longest", "slips", "mood", "energy", "tasksDone", "onTime", "overdue"];
+export const KPIS = ["rate", "done", "checkins", "perfectDays", "activeDays", "longest", "slips", "mood", "energy", "tasksDone", "onTime", "overdue"];
+// These cover every habit whatever group is picked.
+export const GLOBAL_KPIS = new Set(["mood", "energy", "tasksDone", "onTime", "overdue"]);
 export const LOWER_BETTER = new Set(["slips", "overdue"]);
 
 export const kpiValue = (m, key) => (key === "longest" ? m.longest?.count ?? 0 : m[key]);
 
 const meanOf = (values) => mean(values.filter((v) => v != null));
 
-// The mean of several measures, for a comparison with an average; habit rows are matched by habit.
 export function averageMeasure(measures) {
   if (measures.length === 1) return measures[0];
   const out = { from: measures.at(-1).from, cut: measures[0].cut, average: true };
@@ -209,35 +233,58 @@ export function averageMeasure(measures) {
   const ids = new Map();
   for (const m of measures) for (const r of m.rows) ids.set(r.habit.id, [...(ids.get(r.habit.id) ?? []), r]);
   out.rows = [...ids.values()].map((rows) => {
-    const row = { habit: rows[0].habit };
+    const row = { habit: rows[0].habit, rule: rows[0].rule };
     for (const key of ["due", "done", "total", "slips", "clean", "longest", "rate", "average"]) row[key] = meanOf(rows.map((r) => r[key]));
     return row;
   });
   return out;
 }
 
-const firstDay = (facts) => facts.reduce((min, f) => (min && min < f.start ? min : f.start), null);
+// Ranges that some habit's life reaches; with `keepLast`, the last one stays either way.
+export const rangesWithData = (facts, ranges, { keepLast = false } = {}) =>
+  ranges.filter((r, i) => (keepLast && i === ranges.length - 1) || facts.some((f) => f.start <= r.cut && f.end >= r.from));
 
 // Every whole period of `unit` from the first habit's start up to, not including, the one holding `before`.
 export function pastRanges(unit, facts, before) {
-  const first = firstDay(facts);
+  const first = facts.reduce((min, f) => (min && min < f.start ? min : f.start), null);
   if (!first) return [];
+  const stop = periodAround(unit, before).from;
   const out = [];
-  for (let r = periodAround(unit, first); r.from < periodAround(unit, before).from; r = periodAround(unit, shift(unit, r.from, 1))) {
-    out.push({ ...r, cut: r.to });
-  }
+  for (let r = periodAround(unit, first); r.from < stop; r = periodAround(unit, shift(unit, r.from, 1))) out.push({ ...r, cut: r.to });
   return out;
 }
 
-// The past whole period with the highest completion rate, the latest on a tie, or null when none had anything due.
-export function bestRange(data, facts, unit, range, pick = (m) => m.rate) {
+function rateOver(facts, r) {
+  let due = 0;
+  let done = 0;
+  for (const f of facts) {
+    const s = span(f, r.from, r.to);
+    due += s.due;
+    done += s.done;
+  }
+  return due ? done / due : null;
+}
+
+// The past whole period with the highest completion rate, the latest on a tie, measured like `range` is: cut at
+// the same point unless `full`.
+export function bestRange(data, facts, unit, range, { full = false } = {}) {
   let best = null;
   for (const r of pastRanges(unit, facts, range.from)) {
-    const m = measure(data, facts, r);
-    const v = pick(m);
-    if (v != null && (!best || v >= best.value)) best = { range: r, measure: m, value: v };
+    const value = rateOver(facts, r);
+    if (value != null && (!best || value >= best.value)) best = { whole: r, value };
   }
-  return best;
+  if (!best) return null;
+  const cut = { ...best.whole, cut: full ? best.whole.to : matchingCut(unit, range, best.whole) };
+  return { ...best, range: cut, measure: measure(data, facts, cut) };
+}
+
+export function compare(data, facts, unit, range, mode, { full = false } = {}) {
+  if (mode === "best") {
+    const best = unit === "custom" ? null : bestRange(data, facts, unit, range, { full });
+    return best ? { before: best.measure, ranges: [best.range] } : { before: null, ranges: [] };
+  }
+  const ranges = rangesWithData(facts, comparisonRanges(unit, range, mode, { full }));
+  return { before: ranges.length ? averageMeasure(ranges.map((r) => measure(data, facts, r))) : null, ranges };
 }
 
 // The last `count` ranges up to `range`, oldest first; the earlier ones whole.
@@ -256,29 +303,23 @@ export const yearEarlier = (unit, ranges) => ranges.map((r) => {
 });
 
 // A habit's best and worst whole periods with anything due, the latest on a tie.
-export function habitExtremes(data, facts, habitId, unit, before) {
-  const fact = facts.find((f) => f.habit.id === habitId);
-  if (!fact) return null;
+export function habitExtremes(fact, unit, before) {
   let best = null;
   let worst = null;
   for (const r of pastRanges(unit, [fact], before)) {
-    if (r.to < fact.start || r.from > fact.end) continue;
-    const { row } = habitFigures(fact, r.from, r.to);
-    if (row.rate == null) continue;
-    if (!best || row.rate >= best.rate) best = { ...r, rate: row.rate };
-    if (!worst || row.rate <= worst.rate) worst = { ...r, rate: row.rate };
+    const rate = rateOver([fact], r);
+    if (rate == null) continue;
+    if (!best || rate >= best.rate) best = { ...r, rate };
+    if (!worst || rate <= worst.rate) worst = { ...r, rate };
   }
   return best ? { best, worst } : null;
 }
 
-// Logged values of a habit on its due days, grouped into `bins` equal steps from 0 to the largest.
-export function distribution(facts, habitId, from, to, bins = 6) {
-  const fact = facts.find((f) => f.habit.id === habitId);
-  if (!fact) return [];
+// Values logged on a habit's due days, grouped into `bins` equal steps from 0 to the largest.
+export function distribution(fact, from, to, bins = 6) {
   const values = [];
-  for (let i = Math.max(0, daysBetween(fact.start, from)); i <= Math.min(fact.due.length - 1, daysBetween(fact.start, to)); i++) {
-    if (fact.daily[i] && fact.due[i] && !fact.avoid[i]) values.push(fact.values[i]);
-  }
+  const { first, last } = span(fact, from, to);
+  for (let i = first; i <= last; i++) if (fact.daily[i] && fact.due[i] && !fact.avoid[i]) values.push(fact.values[i]);
   const max = Math.max(0, ...values);
   if (!values.length || !max) return [];
   const step = max / bins;
@@ -298,12 +339,12 @@ function csvCell(value) {
 }
 
 export function metricsCsv(measures, nameOf, label = () => "") {
-  const head = ["period", "from", "to", "habit", "due", "done", "rate", "total", "average", "best_day", "slips", "longest_run", "perfect_days", "active_days", "mood", "energy", "tasks_done", "tasks_on_time", "tasks_overdue"];
+  const head = ["period", "from", "to", "habit", "due", "done", "rate", "total", "average", "best_day", "slips", "longest_run", "checkins", "perfect_days", "active_days", "mood", "energy", "tasks_done", "tasks_on_time", "tasks_overdue"];
   const lines = [head];
   for (const m of measures) {
     const at = [label(m), m.from, m.cut];
-    lines.push([...at, "", m.due, m.done, m.rate, "", "", "", m.slips, m.longest?.count ?? 0, m.perfectDays, m.activeDays, m.mood, m.energy, m.tasksDone, m.onTime, m.overdue]);
-    for (const r of m.rows) lines.push([...at, nameOf(r.habit), r.due, r.done, r.rate, r.total, r.average, r.bestDay, r.slips, r.longest]);
+    lines.push([...at, "", m.due, m.done, m.rate, "", "", "", m.slips, m.longest?.count ?? 0, m.checkins, m.perfectDays, m.activeDays, m.mood, m.energy, m.tasksDone, m.onTime, m.overdue]);
+    for (const r of m.rows) lines.push([...at, nameOf(r.habit), r.due, r.done, r.rate, r.total, r.average, r.bestDay, r.slips, r.longest, r.daysLogged]);
   }
   return lines.map((cells) => cells.map(csvCell).join(",")).join("\r\n") + "\r\n";
 }

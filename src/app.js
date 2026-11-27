@@ -1,7 +1,7 @@
 import { $, el, icon, iconButton, mark, lane, toast, heatmap as heatmapGrid, heatmapLegend, lineChart, columnChart } from "./ui.js";
-import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, withRules, changesRules, rulesSince } from "./lib.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, withRules, changesRules, asksRuleChoice, hasPastRules, rulesSince } from "./lib.js";
 import { weekdayPattern, correlations, moodLinks, sharedProgress } from "./insights.js";
-import { UNITS, COMPARES, AVERAGE_OF, KPIS, LOWER_BETTER, kpiValue, rangeFor, comparisonRanges, buildFacts, measure, averageMeasure, bestRange, trendRanges, yearEarlier, habitExtremes, distribution, pastRanges, metricsCsv } from "./metrics.js";
+import { UNITS, AVERAGE_OF, KPIS, GLOBAL_KPIS, LOWER_BETTER, comparesFor, kpiValue, rangeFor, compare, habitFacts, measure, rangesWithData, trendRanges, yearEarlier, habitExtremes, distribution, pastRanges, metricsCsv } from "./metrics.js";
 import { toIcs } from "./ics.js";
 import { importFile } from "./importer.js";
 import { drawCard } from "./card.js";
@@ -51,8 +51,7 @@ const ui = {
   // Habit or task just checked off, so only its tape plays the check-off.
   popped: null,
   shown: null,
-  // What the Compare lane shows; `open` is the habit whose details are showing.
-  period: { unit: "week", back: 0, compare: "previous", full: false, from: null, to: null, kpi: "rate", group: "", overlay: false, open: null },
+  period: { unit: "week", back: 0, compare: "previous", full: false, from: null, to: null, kpi: "rate", group: "", overlay: false, details: null },
   // A rule change waiting for "from today" or "since the rules began", and what was picked per habit today.
   rulePrompt: null,
   rulesPicked: {},
@@ -885,10 +884,11 @@ async function streakCard(habit) {
 
 const insight = (text) => el("article", { class: "item" }, [el("p", { class: "item-title", textContent: text })]);
 
-const factsOf = () => rememberAll("facts", "", () => buildFacts(data(), habits(), today()));
+const factsOf = () => habits().map((h) => remember(h, "facts", () => habitFacts(data(), h, today()))).filter(Boolean);
 
 const shortDay = { month: "short", day: "numeric" };
 const longDay = { month: "short", day: "numeric", year: "numeric" };
+const tenth = (v) => Math.round(v * 10) / 10;
 
 function spanText(from, to) {
   if (from === to) return fmtDay(from, longDay);
@@ -910,6 +910,8 @@ function tickText(unit, r) {
   return fmtDay(r.from, shortDay);
 }
 
+const periodsText = (unit, count) => t(unit === "custom" ? "rangesCount" : unit, { count });
+
 const PERCENT_KPIS = new Set(["rate", "onTime"]);
 const SCALE_KPIS = new Set(["mood", "energy"]);
 
@@ -922,7 +924,7 @@ function kpiText(key, v) {
 
 function deltaMark(key, now, before) {
   if (now == null || before == null) return null;
-  const diff = PERCENT_KPIS.has(key) ? Math.round((now - before) * 100) : Math.round((now - before) * 10) / 10;
+  const diff = PERCENT_KPIS.has(key) ? Math.round((now - before) * 100) : tenth(now - before);
   if (!diff) return mark("±0");
   const good = LOWER_BETTER.has(key) ? diff < 0 : diff > 0;
   const text = `${diff > 0 ? "+" : "−"}${num(Math.abs(diff))}`;
@@ -939,37 +941,28 @@ function currentRange() {
 
 const factsIn = (facts, group) => (group ? facts.filter((f) => groupOf(f.habit) === group) : facts);
 
-// The measure of the chosen range and what it is compared with, recomputed when the data or the choice changes.
+function compareLabel(unit, mode, ranges) {
+  if (mode === "best") return t("bestWas", { period: rangeText(unit, ranges[0]) });
+  if (mode === "average") return t("avgOfLabel", { span: periodsText(unit, ranges.length) });
+  return rangeText(unit, ranges[0]);
+}
+
 function compared() {
   const p = ui.period;
   const range = currentRange();
   const key = JSON.stringify([p.unit, p.back, p.compare, p.full, p.from, p.to, p.group]);
   return rememberAll("compare", key, () => {
     const facts = factsIn(factsOf(), p.group);
-    const now = measure(data(), facts, range);
-    let before = null;
-    let label = "";
-    if (p.compare === "best") {
-      const best = p.unit === "custom" ? null : bestRange(data(), facts, p.unit, range);
-      if (best) {
-        before = best.measure;
-        label = t("bestWas", { period: rangeText(p.unit, best.range) });
-      }
-    } else {
-      const ranges = comparisonRanges(p.unit, range, p.compare, { full: p.full }).filter((r) => facts.some((f) => f.start <= r.cut));
-      if (ranges.length) {
-        before = averageMeasure(ranges.map((r) => measure(data(), facts, r)));
-        label = p.compare === "average" ? t("avgOfLabel", { count: ranges.length }) : rangeText(p.unit, ranges[0]);
-      }
-    }
-    return { range, facts, now, before, label };
+    const { before, ranges } = compare(data(), facts, p.unit, range, p.compare, { full: p.full });
+    return { range, facts, now: measure(data(), facts, range), before, label: before ? compareLabel(p.unit, p.compare, ranges) : "" };
   });
 }
 
 function shownKpis(now, before) {
   const has = (key) => kpiValue(now, key) != null || (before && kpiValue(before, key) != null);
   return KPIS.filter((key) => {
-    if (key === "slips") return now.rows.some((r) => r.habit.type === "avoid") || now.slips > 0;
+    if (ui.period.group && GLOBAL_KPIS.has(key)) return false;
+    if (key === "slips") return now.rows.some((r) => r.rule.type === "avoid") || now.slips > 0;
     if (SCALE_KPIS.has(key) || key === "onTime") return has(key);
     if (key === "tasksDone" || key === "overdue") return data().tasks.length > 0;
     return true;
@@ -979,11 +972,10 @@ function shownKpis(now, before) {
 function kpiTile(key, now, before) {
   const v = kpiValue(now, key);
   const was = before ? kpiValue(before, key) : null;
-  const picked = ui.period.kpi === key;
   return el("button", {
     type: "button",
     class: "kpi",
-    "aria-pressed": String(picked),
+    "aria-pressed": String(ui.period.kpi === key),
     "data-focus-key": `kpi:${key}`,
     onclick: () => {
       ui.period.kpi = key;
@@ -999,9 +991,8 @@ function kpiTile(key, now, before) {
 function periodTools() {
   const p = ui.period;
   const pick = (unit) => {
-    Object.assign(p, { unit, back: 0, open: null });
-    if (unit === "custom" && p.compare === "best") p.compare = "previous";
-    if (unit === "year" && p.compare === "lastYear") p.compare = "previous";
+    Object.assign(p, { unit, back: 0, details: null });
+    if (!comparesFor(unit).includes(p.compare)) p.compare = "previous";
     render();
   };
   return [el("span", { class: "segmented", role: "group", "aria-label": t("periodUnit") }, UNITS.map((unit) =>
@@ -1034,16 +1025,15 @@ function compareControls(range) {
     Object.assign(p, patch);
     render();
   };
-  const modes = COMPARES.filter((m) => !(m === "best" && p.unit === "custom") && !(m === "lastYear" && p.unit === "year"));
   const controls = [
-    pillSelect(t("compareWith"), "period:compare", p.compare, modes.map((m) => [m, t(`cmp_${m}`, { count: AVERAGE_OF[p.unit] })]), (v) => set({ compare: v })),
+    pillSelect(t("compareWith"), "period:compare", p.compare, comparesFor(p.unit).map((m) => [m, t(`cmp_${m}`, { span: periodsText(p.unit, AVERAGE_OF[p.unit]) })]), (v) => set({ compare: v })),
   ];
-  if (range.cut < range.to && p.compare !== "best") {
+  if (range.cut < range.to) {
     controls.push(pillSelect(t("countBy"), "period:full", p.full ? "full" : "same", [["same", t("sameDays")], ["full", t("wholePeriod")]], (v) => set({ full: v === "full" })));
   }
   const groups = [...new Set(habits().map(groupOf).filter(Boolean))].sort();
   if (groups.length) {
-    controls.push(pillSelect(t("group"), "period:group", p.group, [["", t("allGroups")], ...groups.map((g) => [g, g])], (v) => set({ group: v, open: null })));
+    controls.push(pillSelect(t("group"), "period:group", p.group, [["", t("allGroups")], ...groups.map((g) => [g, g])], (v) => set({ group: v, details: null })));
   }
   if (p.unit === "custom") {
     const date = (field, label) => {
@@ -1070,8 +1060,7 @@ function compareControls(range) {
 
 function downloadCompareCsv() {
   const { range, now, before, label } = compared();
-  const rows = before ? [now, before] : [now];
-  const csv = metricsCsv(rows, habitName, (m) => (m === now ? rangeText(ui.period.unit, range) : label));
+  const csv = metricsCsv(before ? [now, before] : [now], habitName, (m) => (m === now ? rangeText(ui.period.unit, range) : label));
   download(new Blob([csv], { type: "text/csv" }), `habit-tracker-${range.from}-${range.cut}.csv`);
 }
 
@@ -1086,17 +1075,21 @@ const trendLabel = (unit, r) => ({ short: tickText(unit, r), long: rangeText(uni
 
 function trendCharts(range, facts) {
   const p = ui.period;
-  const key = JSON.stringify([p.unit, p.back, p.from, p.to, p.group]);
-  const [ranges, measures, earlierMeasures] = rememberAll("trend", key, () => {
-    const list = trendRanges(p.unit, range).filter((r, i, all) => i === all.length - 1 || facts.some((f) => f.start <= r.cut));
-    const earlierList = yearEarlier(p.unit, list);
-    return [list, list.map((r) => measure(data(), facts, r)), earlierList.map((r) => measure(data(), facts, r))];
+  const key = JSON.stringify([p.unit, p.back, p.from, p.to, p.group, p.overlay]);
+  const { ranges, measures, earlierMeasures } = rememberAll("trend", key, () => {
+    const list = rangesWithData(facts, trendRanges(p.unit, range), { keepLast: true });
+    return {
+      ranges: list,
+      measures: list.map((r) => measure(data(), facts, r)),
+      earlierMeasures: p.overlay ? yearEarlier(p.unit, list).map((r) => measure(data(), facts, r)) : null,
+    };
   });
   const kpi = p.kpi;
   const series = [{ name: t("thisSeries"), tone: "green", values: measures.map((m) => kpiValue(m, kpi)) }];
-  if (p.overlay) series.push({ name: t("yearBefore"), tone: "muted", values: earlierMeasures.map((m) => kpiValue(m, kpi)) });
+  if (earlierMeasures) series.push({ name: t("yearBefore"), tone: "muted", values: earlierMeasures.map((m) => kpiValue(m, kpi)) });
   const scale = PERCENT_KPIS.has(kpi) ? { min: 0, max: 1 } : SCALE_KPIS.has(kpi) ? { min: 1, max: 5 } : { min: 0 };
   const labels = ranges.map((r) => trendLabel(p.unit, r));
+  const title = t("trendOf", { metric: t(`kpi_${kpi}`), span: periodsText(p.unit, ranges.length) });
   const overlay = el("label", { class: "meta-group check-label" }, [
     el("input", { type: "checkbox", checked: p.overlay, "data-focus-key": "period:overlay", onchange: (e) => {
       p.overlay = e.target.checked;
@@ -1105,10 +1098,10 @@ function trendCharts(range, facts) {
     el("span", { class: "meta-label", textContent: t("showYearBefore") }),
   ]);
   const out = [el("article", { class: "item" }, [
-    el("div", { class: "item-meta" }, [el("p", { class: "chart-title", textContent: t("trendOf", { metric: t(`kpi_${kpi}`), count: ranges.length }) }), overlay]),
-    lineChart({ label: t("trendOf", { metric: t(`kpi_${kpi}`), count: ranges.length }), labels, series, format: (v) => kpiText(kpi, v), ...scale, tableSummary: t("showTable") }),
+    el("div", { class: "item-meta" }, [el("p", { class: "chart-title", textContent: title }), overlay]),
+    lineChart({ label: title, labels, series, format: (v) => kpiText(kpi, v), ...scale, tableSummary: t("showTable") }),
   ])];
-  if (!SCALE_KPIS.has(kpi) && measures.some((m) => m.mood != null || m.energy != null)) {
+  if (!SCALE_KPIS.has(kpi) && !p.group && measures.some((m) => m.mood != null || m.energy != null)) {
     out.push(el("article", { class: "item" }, [
       el("p", { class: "chart-title", textContent: t("moodEnergy") }),
       lineChart({
@@ -1125,24 +1118,37 @@ function trendCharts(range, facts) {
   return out;
 }
 
-function rowFigures(habit, row) {
+function rowFigures(row) {
   if (!row) return { value: null, text: "–" };
-  if (habit.type === "avoid") return { value: row.slips, text: t("slipsCount", { count: Math.round(row.slips * 10) / 10 }), key: "slips" };
+  if (row.rule.type === "avoid") return { value: row.slips, text: t("slipsCount", { count: tenth(row.slips) }), key: "slips" };
   return { value: row.rate, text: percent(row.rate), key: "rate" };
 }
 
-function habitDetails(habit, range, facts, row) {
+function habitDetails(row, range, facts) {
   const p = ui.period;
-  const ranges = trendRanges(p.unit, range).filter((r, i, all) => i === all.length - 1 || r.to >= habit.start);
-  const measures = rememberAll(`habitTrend:${habit.id}`, JSON.stringify([p.unit, p.back, p.from, p.to]), () => ranges.map((r) => measure(data(), facts.filter((f) => f.habit.id === habit.id), r)));
-  const avoid = habit.type === "avoid";
-  const values = measures.map((m) => (m.rows[0] ? (avoid ? m.rows[0].slips : m.rows[0].rate) : null));
-  const extremes = p.unit === "custom" ? null : habitExtremes(data(), facts, habit.id, p.unit, range.from);
-  const bins = isAmount(habit) ? distribution(facts, habit.id, ranges[0].from, range.cut) : [];
+  const { habit, rule } = row;
+  const avoid = rule.type === "avoid";
+  const fact = facts.find((f) => f.habit.id === habit.id);
+  const { ranges, measures, extremes, bins } = rememberAll(`habitTrend:${habit.id}`, JSON.stringify([p.unit, p.back, p.from, p.to]), () => {
+    const list = rangesWithData([fact], trendRanges(p.unit, range), { keepLast: true });
+    return {
+      ranges: list,
+      measures: list.map((r) => measure(data(), [fact], r)),
+      extremes: p.unit === "custom" ? null : habitExtremes(fact, p.unit, range.from),
+      bins: isAmount(rule) ? distribution(fact, list[0].from, range.cut) : [],
+    };
+  });
+  // A period ruled by another kind of habit has nothing comparable to plot.
+  const values = measures.map((m) => {
+    const r = m.rows[0];
+    if (!r || (r.rule.type === "avoid") !== avoid) return null;
+    return avoid ? r.slips : r.rate;
+  });
   const metric = avoid ? t("kpi_slips") : t("kpi_rate");
+  const distributionTitle = t("distributionLabel", { span: periodsText(p.unit, ranges.length) });
   return el("div", { class: "habit-details" }, [
     lineChart({
-      label: t("trendOf", { metric: `${habitName(habit)} · ${metric}`, count: ranges.length }),
+      label: t("trendOf", { metric: `${habitName(habit)} · ${metric}`, span: periodsText(p.unit, ranges.length) }),
       labels: ranges.map((r) => trendLabel(p.unit, r)),
       series: [{ name: metric, tone: avoid ? "red" : "green", values }],
       format: avoid ? num : percent,
@@ -1153,22 +1159,23 @@ function habitDetails(habit, range, facts, row) {
       mark(t("bestPeriod", { period: rangeText(p.unit, extremes.best), rate: percent(extremes.best.rate) }), "green"),
       mark(t("worstPeriod", { period: rangeText(p.unit, extremes.worst), rate: percent(extremes.worst.rate) })),
     ]) : null,
-    row && isAmount(habit) && row.average != null ? el("p", { class: "item-marks" }, [mark(t("amountSummary", { average: num(row.average), best: num(row.bestDay), unit: unitOf(habit) }))]) : null,
-    bins.length ? el("p", { class: "chart-title", textContent: t("distributionLabel", { count: ranges.length }) }) : null,
-    bins.length ? columnChart({ label: t("distributionLabel", { count: ranges.length }), bars: bins.map((b) => ({ label: `${num(b.from)}–${num(b.to)}`, value: b.count })) }) : null,
+    isAmount(rule) && row.average != null ? el("p", { class: "item-marks" }, [mark(t("amountSummary", { average: num(row.average), best: num(row.bestDay), unit: unitOf(rule) }))]) : null,
+    bins.length ? el("p", { class: "chart-title", textContent: distributionTitle }) : null,
+    bins.length ? columnChart({ label: distributionTitle, bars: bins.map((b) => ({ label: `${num(b.from)}–${num(b.to)}`, value: b.count })) }) : null,
   ]);
 }
 
-function compareRow(habit, row, was, range, facts) {
+// `before` is the comparison's figures for this habit, or null when nothing is compared.
+function compareRow(row, before, range, facts) {
   const p = ui.period;
-  const open = p.open === habit.id;
-  const now = rowFigures(habit, row);
-  const before = was === undefined ? null : rowFigures(habit, was);
+  const { habit, rule } = row;
+  const open = p.details === habit.id;
+  const now = rowFigures(row);
   const marks = [];
-  if (row?.due && habit.type === "avoid") marks.push(mark(t("cleanDays", { count: Math.round(row.clean * 10) / 10 })));
-  else if (row?.due) marks.push(mark(t("doneOfDue", { done: num(row.done), due: num(row.due) })));
-  else if (row?.total && !isAmount(habit)) marks.push(mark(t("loggedTimes", { count: Math.round(row.total * 10) / 10 })));
-  if (row && isAmount(habit) && row.total) marks.push(mark(`${num(row.total)} ${unitOf(habit)}`.trim()));
+  if (row.due && rule.type === "avoid") marks.push(mark(t("cleanDays", { count: tenth(row.clean) })));
+  else if (row.due) marks.push(mark(t("doneOfDue", { done: num(row.done), due: num(row.due) })));
+  else if (row.total && !isAmount(rule)) marks.push(mark(t("loggedTimes", { count: tenth(row.total) })));
+  if (isAmount(rule) && row.total) marks.push(mark(`${num(row.total)} ${unitOf(rule)}`.trim()));
   if (before && (before.value != null || now.value != null)) {
     marks.push(el("span", { class: "meta-label", textContent: t("vsValue", { value: before.text }) }), deltaMark(now.key ?? before.key, now.value, before.value));
   }
@@ -1179,15 +1186,16 @@ function compareRow(habit, row, was, range, facts) {
     "data-focus-key": `${habit.id}:details`,
     textContent: t(open ? "hideDetails" : "details"),
     onclick: () => {
-      p.open = open ? null : habit.id;
+      p.details = open ? null : habit.id;
       render();
     },
   });
+  const tone = rule.type === "avoid" ? (row.slips ? " is-slip" : " is-done") : row.rate >= 1 ? " is-done" : "";
   return itemRow({
     id: `cmp-${habit.id}`,
-    tape: el("span", { class: `tape item-tape${habit.type === "avoid" ? (row?.slips ? " is-slip" : " is-done") : row?.rate >= 1 ? " is-done" : ""}`, textContent: now.text }),
+    tape: el("span", { class: `tape item-tape${tone}`, textContent: now.text }),
     body: [el("p", { class: "item-title", textContent: habitName(habit) + (habit.archived ? ` · ${t("archived")}` : "") }), el("p", { class: "item-marks" }, [...marks, toggle])],
-    after: open ? [habitDetails(habit, range, facts, row)] : [],
+    after: open ? [habitDetails(row, range, facts)] : [],
   });
 }
 
@@ -1196,23 +1204,22 @@ function compareRows(now, before, range, facts) {
   const change = (r) => {
     const b = was.get(r.habit.id);
     if (!b) return -1;
-    const key = r.habit.type === "avoid" ? "slips" : "rate";
+    const key = r.rule.type === "avoid" ? "slips" : "rate";
     return r[key] == null || b[key] == null ? -1 : Math.abs(r[key] - b[key]) / (key === "slips" ? Math.max(1, b.slips) : 1);
   };
   return now.rows
     .filter((r) => r.due || r.slips || r.total)
     .sort((a, b) => change(b) - change(a))
-    .map((r) => compareRow(r.habit, r, before ? was.get(r.habit.id) ?? null : undefined, range, facts));
+    .map((r) => compareRow(r, before ? rowFigures(was.get(r.habit.id)) : null, range, facts));
 }
 
 function compareLane() {
   const p = ui.period;
   const { range, facts, now, before, label } = compared();
   const rows = [periodNav(range), compareControls(range)];
-  const hasData = now.due || now.checkins || now.slips || now.tasksDone;
-  if (hasData) {
+  if (facts.some((f) => f.start <= range.cut && f.end >= range.from)) {
     rows.push(el("article", { class: "item" }, [
-      before ? el("p", { class: "meta-label", textContent: t("comparedWith", { period: label }) }) : el("p", { class: "meta-label", textContent: t("noComparison") }),
+      el("p", { class: "meta-label", textContent: before ? t("comparedWith", { period: label }) : t("noComparison") }),
       el("div", { class: "kpis" }, shownKpis(now, before).map((key) => kpiTile(key, now, before))),
       p.unit === "year" && (now.top || now.longest) ? el("p", { class: "item-marks" }, [
         now.top ? mark(`${t("topHabit")}: ${habitName(now.top.habit)} · ${units(now.top.days, "day")}`, "green") : null,
@@ -1395,39 +1402,49 @@ function habitSummary(habit) {
 const labelled = (label, input, after = "") =>
   el("label", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: label }), input, after ? el("span", { class: "meta-label", textContent: after }) : null]);
 
-// A change to how days are counted asks once a day per habit whether it starts today or covers the current rules' whole span.
+// A change to how days are counted asks once a day per habit how far back it reaches; later changes that day follow
+// the same answer.
 function patchRules(habit, patch) {
-  const now = today();
   const picked = ui.rulesPicked[habit.id];
-  const startedToday = (habit.past ?? []).some((e) => e.until >= addDays(now, -1));
-  if (habit.start >= now || !changesRules(habit, patch) || startedToday) return commitRules(habit, patch, true);
-  if (picked?.day === now) return commitRules(habit, patch, picked.fromToday);
+  if (!asksRuleChoice(habit, patch, today())) return commitRules(habit, patch, "today");
+  if (picked?.day === today()) return commitRules(habit, patch, picked.scope);
   ui.rulePrompt = { id: habit.id, patch };
   render();
 }
 
-function commitRules(habit, patch, fromToday) {
+function commitRules(habit, patch, scope) {
   const current = data().habits.find((h) => h.id === habit.id);
   if (!current) return;
   ui.rulePrompt = null;
-  if (changesRules(current, patch)) ui.rulesPicked[habit.id] = { day: today(), fromToday };
-  store.commit({ t: "habit", habit: withRules(current, patch, today(), fromToday) });
+  if (changesRules(current, patch)) ui.rulesPicked[habit.id] = { day: today(), scope };
+  store.commit({ t: "habit", habit: withRules(current, patch, today(), scope) });
 }
 
 function rulePromptRow(habit) {
   const { patch } = ui.rulePrompt;
-  const since = fmtDay(rulesSince(habit), { month: "short", day: "numeric", year: "numeric" });
+  const apply = (scope) => () => commitRules(habit, patch, scope);
+  const cancel = () => {
+    ui.rulePrompt = null;
+    render();
+  };
   return el("div", { class: "rule-prompt", role: "group", "aria-label": t("rulesPrompt") }, [
     el("p", { class: "hint", textContent: t("rulesPrompt") }),
     el("div", { class: "row" }, [
-      el("button", { type: "button", class: "btn", "data-focus-key": `${habit.id}:rulesToday`, textContent: t("rulesFromToday"), onclick: () => commitRules(habit, patch, true) }),
-      textButton(t("rulesSinceDate", { date: since }), () => commitRules(habit, patch, false), { small: true }),
-      textButton(t("cancel"), () => {
-        ui.rulePrompt = null;
-        render();
-      }, { small: true }),
+      el("button", { type: "button", class: "btn", "data-focus-key": `${habit.id}:rulesToday`, textContent: t("rulesFromToday"), onclick: apply("today") }),
+      hasPastRules(habit) ? textButton(t("rulesSinceDate", { date: fmtDay(rulesSince(habit), longDay) }), apply("current"), { small: true }) : null,
+      textButton(t("rulesAll"), apply("all"), { small: true }),
+      textButton(t("cancel"), cancel, { small: true }),
     ]),
   ]);
+}
+
+// The days it was archived become a break, so they do not count as missed.
+function restoreHabit(habit) {
+  const ops = [{ t: "habit", habit: { ...habit, archived: false, archivedAt: undefined } }];
+  const from = habit.archivedAt && addDays(habit.archivedAt, 1);
+  const to = addDays(today(), -1);
+  if (from && from <= to) ops.push({ t: "break", break: { id: uid(), from, to, habitId: habit.id } });
+  commitAll(ops);
 }
 
 function editRow(habit) {
@@ -1452,7 +1469,7 @@ function editRow(habit) {
   const head = el("div", { class: "edit-row" }, [
     toggle,
     el("div", { class: "item-actions" }, [
-      habit.archived ? textButton(t("restore"), () => patch({ archived: false, archivedAt: undefined }), { small: true }) : null,
+      habit.archived ? textButton(t("restore"), () => restoreHabit(habit), { small: true }) : null,
       iconButton("up", t("moveUp"), () => moveHabit(habit, -1), { disabled: at === 0, "data-focus-key": `${habit.id}:up` }),
       iconButton("down", t("moveDown"), () => moveHabit(habit, 1), { disabled: at === peers.length - 1, "data-focus-key": `${habit.id}:down` }),
     ]),
@@ -1495,6 +1512,8 @@ function editRow(habit) {
       placeholder: t("unitPlaceholder"),
       "data-focus-key": `${habit.id}:unit`,
       oninput: () => patch({ unit: unit.value }, { quiet: true }),
+      // Past amounts keep their numbers, so a new unit misreads them.
+      onchange: () => habit.start < today() && toast(t("unitChanged")),
     });
     fields.push(labelled(t("unit"), unit));
   }
@@ -1548,7 +1567,7 @@ function editRow(habit) {
       labelled(t("habitName"), name),
       el("div", { class: "item-meta" }, fields),
       ui.rulePrompt?.id === habit.id ? rulePromptRow(habit) : null,
-      habit.past?.length ? el("p", { class: "item-marks" }, [mark(t("rulesSinceMark", { date: fmtDay(rulesSince(habit), { month: "short", day: "numeric", year: "numeric" }) }))]) : null,
+      hasPastRules(habit) ? el("p", { class: "item-marks" }, [mark(t("rulesSinceMark", { date: fmtDay(rulesSince(habit), longDay) }))]) : null,
       el("div", { class: "row" }, actions),
     ]),
   ]);

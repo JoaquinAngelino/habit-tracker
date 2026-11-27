@@ -12,6 +12,9 @@ export const daysBetween = (from, to) => Math.round((toUtc(to) - toUtc(from)) / 
 export const weekday = (iso) => (new Date(toUtc(iso)).getUTCDay() + 6) % 7;
 export const weekStart = (iso) => addDays(iso, -weekday(iso));
 export const later = (a, b) => (a > b ? a : b);
+export const earlier = (a, b) => (a < b ? a : b);
+export const mean = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
+const isIsoDate = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
 // The same day of a later month, or that month's last day when it is shorter.
 export function addMonths(iso, n) {
@@ -61,52 +64,67 @@ export const isSkipped = (data, id, date) => Boolean(data.skips?.[date]?.[id]);
 // Fixed when the interval is chosen, so moving the start date leaves the days where they were.
 export const everyFrom = (habit) => habit.everyFrom ?? habit.start;
 
-// Fields that decide whether a day is due and done. A change to them can start a new era, so days already
-// past keep the rules they were logged under.
-export const RULE_FIELDS = ["type", "target", "days", "every", "everyFrom"];
-
+// The fields that decide whether a day is due and done. Days already past keep the ones they were logged under.
 const ruleOf = (habit) => ({ type: habit.type, target: habit.target ?? 1, days: habit.days ?? [], every: habit.every ?? 0, everyFrom: everyFrom(habit) });
+
+// Eras come from synced or imported files, so only well-formed rule fields are taken from them.
+function cleanEra(era) {
+  if (!era || typeof era !== "object" || !isIsoDate(era.until)) return null;
+  const out = { until: era.until };
+  if (typeof era.type === "string") out.type = era.type;
+  if (Number.isFinite(era.target) && era.target > 0) out.target = era.target;
+  if (Array.isArray(era.days)) out.days = era.days.filter((d) => Number.isInteger(d) && d >= 0 && d < 7);
+  if (Number.isFinite(era.every) && era.every >= 0) out.every = era.every;
+  if (isIsoDate(era.everyFrom)) out.everyFrom = era.everyFrom;
+  return out;
+}
 
 // `past` holds the eras that ended, each with its last day in `until`; the habit's own fields rule after the last.
 // Older versions ignore `past`, so their edits only ever change the current era.
 const erasCache = new WeakMap();
 function erasOf(habit) {
-  if (!habit.past?.length) return null;
+  if (!Array.isArray(habit.past) || !habit.past.length) return [];
   let eras = erasCache.get(habit);
   if (!eras) {
     eras = habit.past
-      .filter((e) => e?.until)
+      .map(cleanEra)
+      .filter(Boolean)
       .sort((a, b) => (a.until < b.until ? -1 : a.until > b.until ? 1 : 0))
-      .map(({ until, ...rule }) => ({ until, habit: { ...habit, ...rule, past: undefined } }));
+      .map(({ until, ...rule }) => ({ until, rule, habit: { ...habit, ...rule, past: undefined } }));
     erasCache.set(habit, eras);
   }
   return eras;
 }
 
 export function habitAt(habit, date) {
-  const eras = erasOf(habit);
-  if (eras) for (const era of eras) if (date <= era.until) return era.habit;
+  for (const era of erasOf(habit)) if (date <= era.until) return era.habit;
   return habit;
 }
 
 export function rulesSince(habit) {
-  const last = erasOf(habit)?.at(-1)?.until;
+  const last = erasOf(habit).at(-1)?.until;
   return last ? later(addDays(last, 1), habit.start) : habit.start;
 }
+
+export const hasPastRules = (habit) => erasOf(habit).length > 0;
 
 const sameRule = (a, b) => JSON.stringify(ruleOf(a)) === JSON.stringify(ruleOf(b));
 
 export const changesRules = (habit, patch) => !sameRule(habit, { ...habit, ...patch });
 
-// The habit with `patch` applied. With `fromToday`, the rules it had until yesterday become an ended era; edits on
-// the same day after the first change only the new era.
-export function withRules(habit, patch, today, fromToday) {
+// Whether applying `patch` today needs a choice between starting new rules today and rewriting the old ones.
+// Once rules were changed today, later changes that day only adjust the new ones.
+export const asksRuleChoice = (habit, patch, today) =>
+  habit.start < today && changesRules(habit, patch) && !erasOf(habit).some((e) => e.until >= addDays(today, -1));
+
+// The habit with `patch` applied: "today" ends the current rules yesterday, "current" rewrites them since they
+// began, and "all" rewrites every day since the habit started.
+export function withRules(habit, patch, today, scope) {
   const next = { ...habit, ...patch };
-  if (!fromToday || habit.start >= today || sameRule(habit, next)) return next;
-  const yesterday = addDays(today, -1);
-  const past = habit.past ?? [];
-  if (past.some((e) => e.until >= yesterday)) return next;
-  return { ...next, past: [...past, { until: yesterday, ...ruleOf(habit) }] };
+  if (scope === "all") return { ...next, past: undefined };
+  if (scope !== "today" || !asksRuleChoice(habit, patch, today)) return next;
+  const past = erasOf(habit).map((e) => ({ until: e.until, ...e.rule }));
+  return { ...next, past: [...past, { until: addDays(today, -1), ...ruleOf(habit) }] };
 }
 
 export function isScheduled(habit, date) {
@@ -125,18 +143,15 @@ export function isOff(data, habit, date) {
   return isOnBreak(data, h, date) || (canSchedule(h) && (isSkipped(data, h.id, date) || !isScheduled(h, date)));
 }
 
-// The last day a habit counts: today, or the day it was archived. One archived before that day was recorded
-// ends on its last entry.
+// The last day an archived habit counts: the day it was archived, or its last entry when that is later, as when an
+// older version restored and archived it again without updating `archivedAt`.
 export function lastDay(data, habit, today) {
   if (!habit.archived) return today;
-  let end = habit.archivedAt;
-  if (!end) {
-    end = habit.start;
-    for (const name of Object.values(HABIT_DAY_MAPS)) {
-      for (const [date, day] of Object.entries(data[name] ?? {})) if (day[habit.id] && date > end) end = date;
-    }
+  let end = isIsoDate(habit.archivedAt) ? habit.archivedAt : habit.start;
+  for (const name of Object.values(HABIT_DAY_MAPS)) {
+    for (const [date, day] of Object.entries(data[name] ?? {})) if (day[habit.id] && date > end) end = date;
   }
-  return end < today ? end : today;
+  return earlier(end, today);
 }
 
 // For an avoid habit the logged value marks a slip, so an empty day is a good one.
@@ -148,13 +163,14 @@ export function isDone(habit, value) {
 
 const monthStart = (iso) => `${iso.slice(0, 7)}-01`;
 
-const PERIODS = {
+export const PERIODS = {
   day: { start: (d) => d, next: (d) => addDays(d, 1), prev: (d) => addDays(d, -1) },
   week: { start: weekStart, next: (d) => addDays(d, 7), prev: (d) => addDays(d, -7) },
   month: { start: monthStart, next: (d) => monthStart(addDays(d, 32)), prev: (d) => monthStart(addDays(d, -1)) },
+  year: { start: (d) => `${d.slice(0, 4)}-01-01`, next: (d) => addMonths(d, 12), prev: (d) => addMonths(d, -12) },
 };
 
-export const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
+const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
 
 // Times logged in the week or month that holds `date`; a day can count more than once.
 export function periodCount(data, habit, date) {
@@ -189,7 +205,7 @@ function typeRuns(habit) {
     if (runs.at(-1)?.type === type) runs.at(-1).to = to;
     else runs.push({ type, from, to });
   };
-  for (const era of erasOf(habit) ?? []) {
+  for (const era of erasOf(habit)) {
     if (era.until < from) continue;
     add(era.habit.type, era.until);
     from = addDays(era.until, 1);
@@ -199,39 +215,44 @@ function typeRuns(habit) {
 }
 
 // The periods a habit is measured in from `from` to `to`, oldest first: days, or weeks and months keyed by their
-// first day, each judged by the rules of its last day. A type change starts a new `run`, and a period it cuts
-// belongs to the new type.
+// first day, each judged by the rules of its last day. A type change starts a new `run`: the old type keeps the
+// periods that ended before it, and the period holding the change belongs to the new type.
 export function periodsOf(data, habit, from, to) {
   const out = [];
   const runs = typeRuns(habit);
   runs.forEach((r, run) => {
-    const p = PERIODS[periodOf(r)];
+    const unit = periodOf(r);
+    const p = PERIODS[unit];
     const next = runs[run + 1];
-    const stop = next ? PERIODS[periodOf(next)].start(next.from) : null;
     const lastStart = p.start(r.to && r.to < to ? r.to : to);
     for (let d = p.start(later(from, r.from)); d <= lastStart; d = p.next(d)) {
-      if (stop && p.next(d) > stop) break;
-      const end = addDays(p.next(d), -1);
+      const end = unit === "day" ? d : addDays(p.next(d), -1);
+      if (next && end >= next.from) break;
       const rule = habitAt(habit, end);
       const met = periodMet(data, rule, d);
-      out.push({ start: d, end, rule, run, met, off: !met && periodOff(data, rule, d) });
+      out.push({ start: d, end, unit, rule, run, met, off: !met && periodOff(data, rule, d) });
     }
   });
   return out;
 }
+
+// A period counts toward a rate unless it was off, or is still open on `last` and not met yet. A slip on an avoid
+// habit is final, so its day counts at once.
+export const countsTowardRate = (period, last) => period.met || !(period.off || (period.end >= last && period.rule.type !== "avoid"));
 
 // An unfinished current period does not break a streak yet; a slip on an avoid habit is final.
 const stillOpen = (period) => period.rule.type !== "avoid" && !period.met;
 
 export function streak(data, habit, today) {
   const periods = periodsOf(data, habit, habit.start, today);
+  const unit = periodOf(habit);
   let best = 0;
   let count = 0;
   periods.forEach((x, i) => {
     if (i && x.run !== periods[i - 1].run) count = 0;
     if (x.off) return;
     count = x.met ? count + 1 : 0;
-    best = Math.max(best, count);
+    if (x.unit === unit) best = Math.max(best, count);
   });
   let current = 0;
   const last = periods.at(-1);
@@ -239,18 +260,18 @@ export function streak(data, habit, today) {
     if (periods[i].met) current++;
     else if (!periods[i].off) break;
   }
-  return { current, best, unit: periodOf(habit) };
+  return { current, best, unit };
 }
 
 export function rate(data, habit, today, days) {
   const periods = periodsOf(data, habit, addDays(today, -(days - 1)), today);
   let hit = 0;
   let total = 0;
-  periods.forEach((x, i) => {
-    if (!x.met && ((i === periods.length - 1 && x.rule.type !== "avoid") || x.off)) return;
+  for (const x of periods) {
+    if (!countsTowardRate(x, today)) continue;
     total++;
     if (x.met) hit++;
-  });
+  }
   return total ? hit / total : null;
 }
 

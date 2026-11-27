@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { emptyData, streak, rate, isOff, level, goalProgress, habitAt, withRules, rulesSince, changesRules, lastDay, recentLevels } from "../src/lib.js";
-import { buildFacts, measure, rangeFor, comparisonRanges, averageMeasure, bestRange, trendRanges, yearEarlier, habitExtremes, distribution, metricsCsv, periodAround } from "../src/metrics.js";
+import { emptyData, streak, rate, isOff, level, goalProgress, habitAt, withRules, rulesSince, changesRules, asksRuleChoice, lastDay, recentLevels } from "../src/lib.js";
+import { correlations } from "../src/insights.js";
+import { toIcs } from "../src/ics.js";
+import { buildFacts, habitFacts, measure, rangeFor, comparisonRanges, compare, averageMeasure, bestRange, trendRanges, yearEarlier, habitExtremes, distribution, metricsCsv, periodAround, comparesFor } from "../src/metrics.js";
 
 const TODAY = "2026-11-24"; // a Tuesday
 const daily = { id: "h", name: "Read", type: "check", target: 1, unit: "", start: "2026-11-01" };
@@ -23,89 +25,149 @@ const measureOf = (data, habits, from, cut, today = TODAY) => measure(data, buil
 
 test("raising a target from today keeps past days done under the old target", () => {
   const water = { ...daily, type: "amount", target: 8, unit: "glasses" };
-  const data = dataWith(water, logOf("h", days("2026-11-01", "2026-11-23", 8)));
-  const raised = withRules(water, { target: 10 }, TODAY, true);
+  const data = dataWith(water, logOf("h", days("2026-11-01", "2026-11-23", 5)));
+  const raised = withRules(water, { target: 10 }, TODAY, "today");
   assert.deepEqual(raised.past, [{ until: "2026-11-23", type: "amount", target: 8, days: [], every: 0, everyFrom: "2026-11-01" }]);
-  assert.equal(rate(data, raised, TODAY, 7), 1);
-  assert.equal(streak(data, raised, TODAY).current, 23);
-  assert.equal(level(data, raised, "2026-11-20", TODAY), 4);
-  data.log[TODAY] = { h: 8 };
-  assert.equal(level(data, raised, TODAY, TODAY), 4 * 0 + Math.ceil((8 / 10) * 4));
-  assert.equal(streak(data, raised, TODAY).current, 23);
+  assert.equal(level(data, raised, "2026-11-20", TODAY), 3);
+  data.log[TODAY] = { h: 5 };
+  assert.equal(level(data, raised, TODAY, TODAY), 2);
   assert.equal(rulesSince(raised), TODAY);
 });
 
-test("correcting the rules for all history applies them to past days too", () => {
+test("rewriting the rules reaches back to when they began, or to the habit's start", () => {
   const water = { ...daily, type: "amount", target: 8 };
   const data = dataWith(water, logOf("h", days("2026-11-01", "2026-11-23", 8)));
-  const corrected = withRules(water, { target: 10 }, TODAY, false);
-  assert.equal(corrected.past, undefined);
-  assert.equal(rate(data, corrected, TODAY, 7), 0);
+  assert.equal(rate(data, withRules(water, { target: 10 }, TODAY, "current"), TODAY, 7), 0);
+  const twice = withRules(withRules(water, { target: 9 }, "2026-11-10", "today"), { target: 10 }, TODAY, "current");
+  assert.equal(habitAt(twice, "2026-11-05").target, 8);
+  assert.equal(habitAt(twice, "2026-11-15").target, 10);
+  assert.equal(withRules(twice, { target: 12 }, TODAY, "all").past, undefined);
 });
 
 test("several edits on one day make one era, and a habit started today never gets one", () => {
-  const once = withRules({ ...daily, type: "amount", target: 8 }, { target: 9 }, TODAY, true);
-  const twice = withRules(once, { target: 10 }, TODAY, true);
-  assert.equal(twice.past.length, 1);
-  assert.equal(twice.past[0].target, 8);
-  assert.equal(twice.target, 10);
-  assert.equal(withRules({ ...daily, start: TODAY }, { days: [0] }, TODAY, true).past, undefined);
-  assert.equal(withRules(daily, { name: "Other" }, TODAY, true).past, undefined);
-  assert.equal(changesRules(daily, { name: "Other" }), false);
+  const once = withRules({ ...daily, type: "amount", target: 8 }, { target: 9 }, TODAY, "today");
+  const twice = withRules(once, { target: 10 }, TODAY, "today");
+  assert.deepEqual([twice.past.length, twice.past[0].target, twice.target], [1, 8, 10]);
+  assert.equal(asksRuleChoice(once, { target: 11 }, TODAY), false);
+  assert.equal(asksRuleChoice({ ...daily, start: TODAY }, { days: [0] }, TODAY), false);
+  assert.equal(asksRuleChoice(daily, { name: "Other" }, TODAY), false);
+  assert.equal(asksRuleChoice(daily, { days: [1] }, TODAY), true);
   assert.equal(changesRules(daily, { days: [1] }), true);
 });
 
 test("a schedule change from today leaves earlier weekends off", () => {
   const weekdays = { ...daily, days: [0, 1, 2, 3, 4] };
-  const data = dataWith(weekdays, logOf("h", Object.fromEntries(Object.entries(days("2026-11-01", "2026-11-23")).filter(([d]) => ![0, 6].includes(new Date(d).getUTCDay())))));
-  const everyDay = withRules(weekdays, { days: [] }, TODAY, true);
+  const weekdaysLog = Object.fromEntries(Object.entries(days("2026-11-01", "2026-11-23")).filter(([d]) => ![0, 6].includes(new Date(d).getUTCDay())));
+  const data = dataWith(weekdays, logOf("h", weekdaysLog));
+  const everyDay = withRules(weekdays, { days: [] }, TODAY, "today");
   assert.equal(isOff(data, everyDay, "2026-11-22"), true);
   assert.equal(isOff(data, everyDay, "2026-11-29"), false);
   assert.equal(rate(data, everyDay, TODAY, 30), 1);
 });
 
 test("every-N days keep their old anchor before the change", () => {
-  const every2 = { ...daily, every: 2 };
-  const every3 = withRules(every2, { every: 3, everyFrom: TODAY }, TODAY, true);
-  assert.equal(isOff(dataWith(every3), every3, "2026-11-03"), false);
-  assert.equal(isOff(dataWith(every3), every3, "2026-11-04"), true);
-  assert.equal(isOff(dataWith(every3), every3, "2026-11-26"), true);
-  assert.equal(isOff(dataWith(every3), every3, "2026-11-27"), false);
+  const every3 = withRules({ ...daily, every: 2 }, { every: 3, everyFrom: TODAY }, TODAY, "today");
+  const data = dataWith(every3);
+  assert.deepEqual(["2026-11-03", "2026-11-04", "2026-11-26", "2026-11-27"].map((d) => isOff(data, every3, d)), [false, true, true, false]);
 });
 
 test("a type change keeps past check-ins done, and a streak starts again at the change", () => {
   const data = dataWith(daily, logOf("h", days("2026-11-01", "2026-11-23")));
-  const avoid = withRules(daily, { type: "avoid" }, TODAY, true);
+  const avoid = withRules(daily, { type: "avoid" }, TODAY, "today");
   assert.equal(habitAt(avoid, "2026-11-10").type, "check");
   assert.equal(rate(data, avoid, "2026-11-23", 7), 1);
   assert.deepEqual(streak(data, avoid, TODAY), { current: 1, best: 23, unit: "day" });
   const m = measureOf(data, [avoid], "2026-11-01", TODAY);
-  assert.deepEqual([m.rows[0].due, m.rows[0].done, m.rows[0].slips, m.checkins], [24, 24, 0, 23]);
+  assert.deepEqual([m.rows[0].due, m.rows[0].done, m.rows[0].slips, m.checkins, m.rows[0].rule.type], [24, 24, 0, 23, "avoid"]);
+  assert.deepEqual(measureOf(data, [avoid], "2026-11-01", "2026-11-23").rows[0].rule.type, "check");
+});
+
+test("a streak's best counts only periods in the habit's current unit", () => {
+  const data = dataWith(daily, logOf("h", days("2026-11-01", "2026-11-23")));
+  const weekly = withRules(daily, { type: "weekly", target: 3 }, TODAY, "today");
+  assert.deepEqual(streak(data, weekly, TODAY), { current: 0, best: 0, unit: "week" });
+});
+
+test("daily to weekly mid-week: the change's week is weekly and counts that week's earlier days", () => {
+  const weekly = withRules(daily, { type: "weekly", target: 3 }, "2026-11-25", "today");
+  const data = dataWith(weekly, logOf("h", { "2026-11-23": 1, "2026-11-24": 1, "2026-11-26": 1 }));
+  const m = measureOf(data, [weekly], "2026-11-23", "2026-11-29", "2026-11-29");
+  assert.deepEqual([m.due, m.done, m.rows[0].longest], [3, 3, 2]);
+  assert.equal(streak(data, weekly, "2026-11-29").current, 1);
+});
+
+test("weekly to daily mid-week drops the week the change cuts", () => {
+  const weekly = { ...daily, type: "weekly", target: 1 };
+  const check = withRules(weekly, { type: "check" }, "2026-11-25", "today");
+  const data = dataWith(check, logOf("h", { "2026-11-17": 1, "2026-11-23": 1, "2026-11-25": 1 }));
+  const m = measureOf(data, [check], "2026-11-16", "2026-11-25", "2026-11-25");
+  assert.deepEqual([m.due, m.done], [2, 2]);
+});
+
+test("monthly to weekly at the start of a month keeps the month that ended before it", () => {
+  const monthly = { ...daily, type: "monthly", target: 2, start: "2026-10-01" };
+  const weekly = withRules(monthly, { type: "weekly", target: 1 }, "2026-12-02", "today");
+  const data = dataWith(weekly, { "2026-10-05": { h: 2 }, "2026-11-05": { h: 2 } });
+  const m = measureOf(data, [weekly], "2026-11-01", "2026-11-30", "2026-12-02");
+  assert.deepEqual([m.due, m.done], [1, 1]);
+});
+
+test("an era that ends before a moved start is ignored", () => {
+  const water = withRules({ ...daily, type: "amount", target: 8 }, { target: 10 }, "2026-11-10", "today");
+  const moved = { ...water, start: "2026-11-15" };
+  const data = dataWith(moved, { "2026-11-16": { h: 10 } });
+  assert.equal(habitAt(moved, "2026-11-16").target, 10);
+  assert.equal(streak(data, moved, "2026-11-16").best, 1);
 });
 
 test("a weekly target changed mid-week applies to the whole week", () => {
   const weekly = { ...daily, type: "weekly", target: 3 };
   const data = dataWith(weekly, { "2026-11-23": { h: 1 }, [TODAY]: { h: 1 } });
-  const lower = withRules(weekly, { target: 2 }, TODAY, true);
+  const lower = withRules(weekly, { target: 2 }, TODAY, "today");
   assert.equal(streak(data, lower, TODAY).current, 1);
   assert.equal(goalProgress(data, { start: "2026-11-01", deadline: "2026-11-30", target: 4 }, lower, TODAY).done, 2);
 });
 
 test("an older version editing the habit changes only the current era", () => {
-  const water = withRules({ ...daily, type: "amount", target: 8 }, { target: 10 }, TODAY, true);
+  const water = withRules({ ...daily, type: "amount", target: 8 }, { target: 10 }, TODAY, "today");
   const edited = { ...water, target: 12 };
   assert.equal(habitAt(edited, "2026-11-20").target, 8);
   assert.equal(habitAt(edited, TODAY).target, 12);
 });
 
-test("an archived habit counts until it was archived, or its last entry when that was not kept", () => {
+test("eras from a malformed file are cleaned instead of breaking the app", () => {
+  const data = dataWith([], { "2026-11-05": { h: 1, other: 1 } });
+  for (const past of ["abc", { length: 1 }, [null], [{ until: 20260101 }], [{ until: "x" }]]) {
+    const habit = { ...daily, past };
+    assert.equal(streak(data, habit, TODAY).best, 1);
+    assert.equal(rulesSince(habit), habit.start);
+    assert.equal(asksRuleChoice(habit, { target: 2 }, TODAY), true);
+  }
+  const swapped = { ...daily, past: [{ until: "2026-11-30", id: "other", start: "2020-01-01", days: [9, 2] }] };
+  assert.deepEqual([habitAt(swapped, "2026-11-05").id, habitAt(swapped, "2026-11-05").start, habitAt(swapped, "2026-11-05").days], ["h", "2026-11-01", [2]]);
+});
+
+test("the calendar starts a changed habit on its current schedule", () => {
+  const habit = withRules({ ...daily, start: "2026-01-05", every: 2, everyFrom: "2026-01-05" }, { every: 3, everyFrom: "2026-03-10" }, "2026-03-10", "today");
+  assert.match(toIcs(dataWith(habit), new Date(Date.UTC(2026, 2, 11))), /DTSTART;VALUE=DATE:20260106\r\n[^]*?INTERVAL=3/);
+});
+
+test("correlations leave out days from an era they cannot read", () => {
+  const a = withRules({ ...daily, id: "a", type: "avoid" }, { type: "check" }, "2026-11-20", "today");
+  const b = { ...daily, id: "b" };
+  const data = dataWith([a, b], logOf("b", days("2026-11-01", "2026-11-19")));
+  assert.deepEqual(correlations(data, [a, b], TODAY, { minDays: 3 }), []);
+});
+
+test("an archived habit counts until it was archived, or a later last entry", () => {
   const data = dataWith(daily, { "2026-11-05": { h: 1 } });
   assert.equal(lastDay(data, daily, TODAY), TODAY);
   assert.equal(lastDay(data, { ...daily, archived: true, archivedAt: "2026-11-10" }, TODAY), "2026-11-10");
   assert.equal(lastDay(data, { ...daily, archived: true }, TODAY), "2026-11-05");
+  assert.equal(lastDay(data, { ...daily, archived: true, archivedAt: "2026-11-02" }, TODAY), "2026-11-05");
   const archived = { ...daily, archived: true, archivedAt: "2026-11-10" };
   assert.equal(measureOf(data, [archived], "2026-11-16", "2026-11-22").rows.length, 0);
-  assert.deepEqual([measureOf(data, [archived], "2026-11-01", "2026-11-15").rows[0].due], [9]);
+  assert.equal(measureOf(data, [archived], "2026-11-01", "2026-11-15").rows[0].due, 9);
 });
 
 test("today counts only once done, and days before the start or off do not count", () => {
@@ -116,18 +178,38 @@ test("today counts only once done, and days before the start or off do not count
   assert.deepEqual([m.due, m.done, m.rate, m.perfectDays, m.activeDays], [2, 2, 1, 2, 2]);
   data.log[TODAY] = { h: 1 };
   m = measureOf(data, [late], "2026-11-16", TODAY);
-  assert.deepEqual([m.due, m.done], [3, 3]);
+  assert.deepEqual([m.due, m.done, m.perfectDays], [3, 3, 3]);
 });
 
-test("weekly and monthly habits count once per period, on its last day or when met while open", () => {
+test("today is not a perfect day while a habit due today is still open", () => {
+  const other = { ...daily, id: "o" };
+  const data = dataWith([daily, other], { [TODAY]: { h: 1 } });
+  assert.equal(measureOf(data, [daily, other], TODAY, TODAY).perfectDays, 0);
+});
+
+test("weekly habits count on the day their target was reached, or their last day when it was not", () => {
   const weekly = { ...daily, id: "w", type: "weekly", target: 2 };
   const data = dataWith(weekly, { "2026-11-10": { w: 1 }, "2026-11-11": { w: 1 }, "2026-11-17": { w: 1 } });
-  assert.deepEqual([measureOf(data, [weekly], "2026-11-15", "2026-11-15").due, measureOf(data, [weekly], "2026-11-15", "2026-11-15").done], [1, 1]);
-  assert.equal(measureOf(data, [weekly], "2026-11-16", "2026-11-21").due, 0);
-  assert.deepEqual([measureOf(data, [weekly], "2026-11-22", "2026-11-22").due, measureOf(data, [weekly], "2026-11-22", "2026-11-22").done], [1, 0]);
-  assert.equal(measureOf(data, [weekly], "2026-11-23", TODAY).due, 0);
+  const on = (from, cut) => {
+    const m = measureOf(data, [weekly], from, cut);
+    return [m.due, m.done];
+  };
+  assert.deepEqual(on("2026-11-11", "2026-11-11"), [1, 1]);
+  assert.deepEqual(on("2026-11-16", "2026-11-21"), [0, 0]);
+  assert.deepEqual(on("2026-11-22", "2026-11-22"), [1, 0]);
+  assert.deepEqual(on("2026-11-23", TODAY), [0, 0]);
   data.log["2026-11-23"] = { w: 2 };
-  assert.deepEqual([measureOf(data, [weekly], "2026-11-23", TODAY).due, measureOf(data, [weekly], "2026-11-23", TODAY).done], [1, 1]);
+  assert.deepEqual(on("2026-11-23", TODAY), [1, 1]);
+});
+
+test("a weekly habit met early in both weeks compares even, like for like", () => {
+  const weekly = { ...daily, id: "w", type: "weekly", target: 1 };
+  const data = dataWith(weekly, { "2026-11-16": { w: 1 }, "2026-11-23": { w: 1 } });
+  const facts = buildFacts(data, [weekly], TODAY);
+  const range = rangeFor("week", TODAY);
+  const { before } = compare(data, facts, "week", range, "previous");
+  const now = measure(data, facts, range);
+  assert.deepEqual([now.due, now.done, before.due, before.done], [1, 1, 1, 1]);
 });
 
 test("a week adds up what was due and done, and a year totals check-ins, amounts and the longest run", () => {
@@ -149,6 +231,20 @@ test("a week adds up what was due and done, and a year totals check-ins, amounts
   assert.deepEqual([year.longest.habit.id, year.longest.count], ["h", 2]);
 });
 
+test("the longest run is in days: weekly runs and a run across a type change do not count", () => {
+  const weekly = { ...daily, id: "w", type: "weekly", target: 1, start: "2026-08-03" };
+  const short = { ...daily, start: "2026-11-01" };
+  const data = dataWith([weekly, short], { ...logOf("h", days("2026-11-01", "2026-11-05")) });
+  for (let d = new Date("2026-08-03T00:00:00Z"); d < new Date("2026-11-24T00:00:00Z"); d.setUTCDate(d.getUTCDate() + 7)) {
+    const k = d.toISOString().slice(0, 10);
+    data.log[k] = { ...data.log[k], w: 1 };
+  }
+  assert.deepEqual(measureOf(data, [weekly, short], "2026-01-01", TODAY).longest, { habit: short, count: 5 });
+  const changed = withRules({ ...daily, type: "check" }, { type: "amount", target: 1 }, "2026-11-11", "today");
+  const both = dataWith(changed, logOf("h", days("2026-11-01", "2026-11-23")));
+  assert.equal(measureOf(both, [changed], "2026-11-01", "2026-11-23").rows[0].longest, 13);
+});
+
 test("an every-N habit's longest run in a year counts the days it was scheduled", () => {
   const habit = { ...daily, start: "2025-12-31", every: 2 };
   const data = dataWith(habit, logOf("h", { "2026-01-02": 1, "2026-01-04": 1, "2026-01-06": 1, "2026-01-08": 1 }));
@@ -159,7 +255,14 @@ test("an avoid habit counts slips and clean days, and stays out of the longest s
   const avoid = { ...daily, type: "avoid" };
   const data = dataWith(avoid, { "2026-11-10": { h: 1 } });
   const m = measureOf(data, [avoid], "2026-11-01", TODAY);
-  assert.deepEqual([m.slips, m.rows[0].clean, m.rows[0].longest, m.longest, m.checkins], [1, 23, 14, null, 0]);
+  assert.deepEqual([m.slips, m.rows[0].clean, m.longest, m.checkins], [1, 23, null, 0]);
+});
+
+test("an amount's average leaves out today's unfinished amount, and a day off logged anyway counts", () => {
+  const pages = { ...daily, type: "amount", target: 10, days: [0, 1, 2, 3, 4] };
+  const data = dataWith(pages, { "2026-11-16": { h: 10 }, "2026-11-22": { h: 30 }, [TODAY]: { h: 5 } });
+  const row = measureOf(data, [pages], "2026-11-16", TODAY).rows[0];
+  assert.deepEqual([row.total, row.dailyDue, row.average], [45, 7, 40 / 7]);
 });
 
 test("periods run Monday to Sunday, by calendar month and by year", () => {
@@ -168,6 +271,7 @@ test("periods run Monday to Sunday, by calendar month and by year", () => {
   assert.deepEqual(rangeFor("year", TODAY, { back: 2 }), { from: "2024-01-01", to: "2024-12-31", cut: "2024-12-31" });
   assert.deepEqual(rangeFor("custom", TODAY, { from: "2026-11-01", to: "2026-11-10", back: 1 }), { from: "2026-10-22", to: "2026-10-31", cut: "2026-10-31" });
   assert.deepEqual(periodAround("day", TODAY), { from: TODAY, to: TODAY });
+  assert.deepEqual([comparesFor("year"), comparesFor("custom")], [["previous", "average", "best"], ["previous", "lastYear", "average"]]);
 });
 
 test("comparisons cut earlier periods at the same point, clipped to shorter months and leap days", () => {
@@ -175,31 +279,31 @@ test("comparisons cut earlier periods at the same point, clipped to shorter mont
   assert.deepEqual(comparisonRanges("month", month, "previous"), [{ from: "2026-02-01", to: "2026-02-28", cut: "2026-02-28" }]);
   const midMonth = rangeFor("month", "2026-03-12");
   assert.deepEqual(comparisonRanges("month", midMonth, "previous"), [{ from: "2026-02-01", to: "2026-02-28", cut: "2026-02-12" }]);
-  assert.deepEqual(comparisonRanges("month", midMonth, "previous", { full: true })[0].cut, "2026-02-28");
+  assert.equal(comparisonRanges("month", midMonth, "previous", { full: true })[0].cut, "2026-02-28");
   const leapDay = rangeFor("year", "2028-02-29");
-  assert.deepEqual(comparisonRanges("year", leapDay, "lastYear"), [{ from: "2027-01-01", to: "2027-12-31", cut: "2027-02-28" }]);
+  assert.deepEqual(comparisonRanges("year", leapDay, "previous"), [{ from: "2027-01-01", to: "2027-12-31", cut: "2027-02-28" }]);
   const week = rangeFor("week", TODAY);
   assert.deepEqual(comparisonRanges("week", week, "lastYear"), [{ from: "2025-11-24", to: "2025-11-30", cut: "2025-11-25" }]);
   assert.deepEqual(comparisonRanges("month", rangeFor("month", TODAY), "lastYear")[0], { from: "2025-11-01", to: "2025-11-30", cut: "2025-11-24" });
   assert.deepEqual(comparisonRanges("week", week, "average").map((r) => r.from), ["2026-11-16", "2026-11-09", "2026-11-02", "2026-10-26"]);
 });
 
-test("an average comparison takes the mean of each figure and of each habit", () => {
+test("an average comparison takes the mean of each figure and of each habit, over ranges with data", () => {
   const data = dataWith(daily, logOf("h", { "2026-11-02": 1, "2026-11-03": 1, "2026-11-09": 1 }));
   const facts = buildFacts(data, [daily], TODAY);
-  const ranges = comparisonRanges("week", rangeFor("week", TODAY), "average").slice(0, 3);
-  const avg = averageMeasure(ranges.map((r) => measure(data, facts, r)));
-  assert.equal(avg.rate, (0 + 0.5 + 1) / 3);
-  assert.equal(avg.rows[0].done, 1);
+  const { before, ranges } = compare(data, facts, "week", rangeFor("week", TODAY), "average");
+  assert.deepEqual(ranges.map((r) => r.from), ["2026-11-16", "2026-11-09", "2026-11-02"]);
+  assert.deepEqual([before.rate, before.rows[0].done], [(0 + 0.5 + 1) / 3, 1]);
+  assert.equal(averageMeasure([before]), before);
 });
 
-test("the best period is the past whole one with the highest rate, the latest on a tie", () => {
+test("the best period is the whole past one with the highest rate, cut like the current one", () => {
   const data = dataWith(daily, logOf("h", { ...days("2026-11-02", "2026-11-08"), ...days("2026-11-16", "2026-11-22") }));
   const facts = buildFacts(data, [daily], TODAY);
   const best = bestRange(data, facts, "week", rangeFor("week", TODAY));
-  assert.equal(best.range.from, "2026-11-16");
-  assert.equal(best.value, 1);
-  const extremes = habitExtremes(data, facts, "h", "week", TODAY);
+  assert.deepEqual([best.whole.from, best.value, best.range.cut, best.measure.done], ["2026-11-16", 1, "2026-11-17", 2]);
+  assert.equal(bestRange(data, facts, "week", rangeFor("week", TODAY), { full: true }).measure.done, 7);
+  const extremes = habitExtremes(facts[0], "week", TODAY);
   assert.deepEqual([extremes.best.from, extremes.worst.from], ["2026-11-16", "2026-11-09"]);
 });
 
@@ -212,9 +316,8 @@ test("a trend lists whole earlier periods and the current one, with the same per
 test("a distribution bins the values logged on due days", () => {
   const pages = { ...daily, type: "amount", target: 10 };
   const data = dataWith(pages, logOf("h", { "2026-11-01": 2, "2026-11-02": 12, "2026-11-03": 6 }));
-  const bins = distribution(buildFacts(data, [pages], TODAY), "h", "2026-11-01", "2026-11-03", 3);
-  assert.deepEqual(bins.map((b) => b.count), [1, 1, 1]);
-  assert.equal(bins[2].to, 12);
+  const bins = distribution(habitFacts(data, pages, TODAY), "2026-11-01", "2026-11-03", 3);
+  assert.deepEqual([bins.map((b) => b.count), bins[2].to], [[1, 1, 1], 12]);
 });
 
 test("the metrics CSV escapes text and keeps spreadsheet formulas from running", () => {
@@ -228,7 +331,7 @@ test("the metrics CSV escapes text and keeps spreadsheet formulas from running",
 });
 
 test("recent levels follow each day's rules", () => {
-  const water = withRules({ ...daily, type: "amount", target: 4 }, { target: 8 }, TODAY, true);
+  const water = withRules({ ...daily, type: "amount", target: 4 }, { target: 8 }, TODAY, "today");
   const data = dataWith(water, { "2026-11-23": { h: 4 } });
   assert.equal(recentLevels(data, water, TODAY, 1)[0], 4);
 });

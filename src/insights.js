@@ -1,4 +1,4 @@
-import { addDays, later, weekday, entry, isDone, isOff, habitAt, streak, recentLevels } from "./lib.js";
+import { addDays, later, weekday, entry, isDone, isOff, habitAt, streak, recentLevels, mean } from "./lib.js";
 
 export const SHARED_WEEKS = 12;
 
@@ -7,11 +7,12 @@ const perDay = (habit) => habit.type !== "weekly" && habit.type !== "monthly";
 const correlatable = (habit) => perDay(habit) && habit.type !== "avoid";
 
 // Each day from `from` to `to` the habit was due, with whether it got done. Today counts only once it is done,
-// and for weekly and monthly habits done means logged that day.
-export function dueDays(data, habit, from, to, today) {
+// and for weekly and monthly habits done means logged that day. Days whose rules fail `keep` are left out.
+export function dueDays(data, habit, from, to, today, keep = () => true) {
   const out = new Map();
   for (let d = later(from, habit.start); d <= to; d = addDays(d, 1)) {
     const rule = habitAt(habit, d);
+    if (!keep(rule)) continue;
     const done = isDone(rule, entry(data, habit.id, d));
     if (!done && (isOff(data, habit, d) || (d === today && rule.type !== "avoid"))) continue;
     out.set(d, done);
@@ -19,7 +20,7 @@ export function dueDays(data, habit, from, to, today) {
   return out;
 }
 
-const lastDays = (data, habit, today, days) => dueDays(data, habit, addDays(today, -(days - 1)), today, today);
+const lastDays = (data, habit, today, days, keep) => dueDays(data, habit, addDays(today, -(days - 1)), today, today, keep);
 
 // Share of each weekday, Monday first, on which the habit got done; null for a weekday it was never due.
 export function weekdayPattern(data, habit, today, days = 90) {
@@ -35,7 +36,7 @@ export function weekdayPattern(data, habit, today, days = 90) {
 // Pairs of habits that tend to get done, or missed, on the same days. `withA` and `withoutA` are how often
 // b got done on days a was done and on days it was not.
 export function correlations(data, habits, today, { days = 90, minDays = 14, minPhi = 0.3, limit = 5 } = {}) {
-  const series = habits.filter(correlatable).map((habit) => ({ habit, days: lastDays(data, habit, today, days) }));
+  const series = habits.filter(correlatable).map((habit) => ({ habit, days: lastDays(data, habit, today, days, correlatable) }));
   const out = [];
   for (let i = 0; i < series.length; i++) {
     for (let j = i + 1; j < series.length; j++) {
@@ -62,7 +63,6 @@ export function correlations(data, habits, today, { days = 90, minDays = 14, min
   return out.sort((x, y) => Math.abs(y.phi) - Math.abs(x.phi)).slice(0, limit);
 }
 
-const mean = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
 const moodOn = (data, date) => data.days?.[date]?.mood || null;
 
 // Habits whose done days have a different average mood than their missed days.
@@ -71,7 +71,7 @@ export function moodLinks(data, habits, today, { days = 90, minDays = 5, minDiff
   for (const habit of habits.filter(correlatable)) {
     const done = [];
     const missed = [];
-    for (const [date, wasDone] of lastDays(data, habit, today, days)) {
+    for (const [date, wasDone] of lastDays(data, habit, today, days, correlatable)) {
       const mood = moodOn(data, date);
       if (mood) (wasDone ? done : missed).push(mood);
     }
