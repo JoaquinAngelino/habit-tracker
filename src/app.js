@@ -1,5 +1,5 @@
 import { $, el, icon, iconButton, mark, lane, toast, heatmap as heatmapGrid, heatmapLegend, lineChart, columnChart } from "./ui.js";
-import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, withRules, changesRules, asksRuleChoice, hasPastRules, rulesSince } from "./lib.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, lastDay, withRules, changesRules, asksRuleChoice, hasPastRules, rulesSince } from "./lib.js";
 import { weekdayPattern, correlations, moodLinks, sharedProgress } from "./insights.js";
 import { UNITS, AVERAGE_OF, KPIS, GLOBAL_KPIS, LOWER_BETTER, comparesFor, kpiValue, rangeFor, compare, habitFacts, measure, rangesWithData, trendRanges, yearEarlier, habitExtremes, distribution, pastRanges, metricsCsv } from "./metrics.js";
 import { toIcs } from "./ics.js";
@@ -835,7 +835,7 @@ function heatmap(habit) {
   const cells = levels.map((_, i) => {
     const date = addDays(first, i);
     const level = date > now ? null : levels[i] ?? "before";
-    const text = level == null || level === "before" ? "" : `${fmtDay(date)}: ${cellText(habit, entry(d, habit.id, date), level)}`;
+    const text = level == null || level === "before" ? "" : `${fmtDay(date)}: ${cellText(habitAt(habit, date), entry(d, habit.id, date), level)}`;
     return { level, text };
   });
   return heatmapGrid(cells, { label: t("heatmapLabel", { name: habitName(habit) }), hint: t("heatmapHint") });
@@ -889,6 +889,8 @@ const factsOf = () => habits().map((h) => remember(h, "facts", () => habitFacts(
 const shortDay = { month: "short", day: "numeric" };
 const longDay = { month: "short", day: "numeric", year: "numeric" };
 const tenth = (v) => Math.round(v * 10) / 10;
+// An average can be fractional: `count` picks the plural form and `n` shows it in the language's format.
+const countOf = (v) => ({ count: tenth(v), n: num(tenth(v)) });
 
 function spanText(from, to) {
   if (from === to) return fmtDay(from, longDay);
@@ -949,8 +951,9 @@ function compareLabel(unit, mode, ranges) {
 
 function compared() {
   const p = ui.period;
+  if (p.group && !habits().some((h) => groupOf(h) === p.group)) p.group = "";
   const range = currentRange();
-  const key = JSON.stringify([p.unit, p.back, p.compare, p.full, p.from, p.to, p.group]);
+  const key = JSON.stringify([p.unit, p.back, p.compare, p.full, p.from, p.to, p.group, getLanguage()]);
   return rememberAll("compare", key, () => {
     const facts = factsIn(factsOf(), p.group);
     const { before, ranges } = compare(data(), facts, p.unit, range, p.compare, { full: p.full });
@@ -1060,7 +1063,7 @@ function compareControls(range) {
 
 function downloadCompareCsv() {
   const { range, now, before, label } = compared();
-  const csv = metricsCsv(before ? [now, before] : [now], habitName, (m) => (m === now ? rangeText(ui.period.unit, range) : label));
+  const csv = metricsCsv(before ? [now, before] : [now], habitName, (m) => (m === now ? rangeText(ui.period.unit, range) : label), { global: !ui.period.group });
   download(new Blob([csv], { type: "text/csv" }), `habit-tracker-${range.from}-${range.cut}.csv`);
 }
 
@@ -1120,7 +1123,7 @@ function trendCharts(range, facts) {
 
 function rowFigures(row) {
   if (!row) return { value: null, text: "–" };
-  if (row.rule.type === "avoid") return { value: row.slips, text: t("slipsCount", { count: tenth(row.slips) }), key: "slips" };
+  if (row.rule.type === "avoid") return { value: row.slips, text: t("slipsCount", countOf(row.slips)), key: "slips" };
   return { value: row.rate, text: percent(row.rate), key: "rate" };
 }
 
@@ -1172,11 +1175,13 @@ function compareRow(row, before, range, facts) {
   const open = p.details === habit.id;
   const now = rowFigures(row);
   const marks = [];
-  if (row.due && rule.type === "avoid") marks.push(mark(t("cleanDays", { count: tenth(row.clean) })));
+  if (row.due && rule.type === "avoid") marks.push(mark(t("cleanDays", countOf(row.clean))));
   else if (row.due) marks.push(mark(t("doneOfDue", { done: num(row.done), due: num(row.due) })));
-  else if (row.total && !isAmount(rule)) marks.push(mark(t("loggedTimes", { count: tenth(row.total) })));
+  else if (row.total && !isAmount(rule)) marks.push(mark(t("loggedTimes", countOf(row.total))));
   if (isAmount(rule) && row.total) marks.push(mark(`${num(row.total)} ${unitOf(rule)}`.trim()));
-  if (before && (before.value != null || now.value != null)) {
+  // Slips and rates cannot be set against each other, as when the habit's type changed in between.
+  const comparable = before && (!before.key || !now.key || before.key === now.key);
+  if (comparable && (before.value != null || now.value != null)) {
     marks.push(el("span", { class: "meta-label", textContent: t("vsValue", { value: before.text }) }), deltaMark(now.key ?? before.key, now.value, before.value));
   }
   const toggle = el("button", {
@@ -1218,9 +1223,11 @@ function compareLane() {
   const { range, facts, now, before, label } = compared();
   const rows = [periodNav(range), compareControls(range)];
   if (facts.some((f) => f.start <= range.cut && f.end >= range.from)) {
+    const kpis = shownKpis(now, before);
+    if (!kpis.includes(p.kpi)) p.kpi = "rate";
     rows.push(el("article", { class: "item" }, [
       el("p", { class: "meta-label", textContent: before ? t("comparedWith", { period: label }) : t("noComparison") }),
-      el("div", { class: "kpis" }, shownKpis(now, before).map((key) => kpiTile(key, now, before))),
+      el("div", { class: "kpis" }, kpis.map((key) => kpiTile(key, now, before))),
       p.unit === "year" && (now.top || now.longest) ? el("p", { class: "item-marks" }, [
         now.top ? mark(`${t("topHabit")}: ${habitName(now.top.habit)} · ${units(now.top.days, "day")}`, "green") : null,
         now.longest ? mark(`${t("longestStreak")}: ${habitName(now.longest.habit)} · ${units(now.longest.count, "day")}`) : null,
@@ -1402,8 +1409,7 @@ function habitSummary(habit) {
 const labelled = (label, input, after = "") =>
   el("label", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: label }), input, after ? el("span", { class: "meta-label", textContent: after }) : null]);
 
-// A change to how days are counted asks once a day per habit how far back it reaches; later changes that day follow
-// the same answer.
+// Asks once a day per habit how far back a rule change reaches.
 function patchRules(habit, patch) {
   const picked = ui.rulesPicked[habit.id];
   if (!asksRuleChoice(habit, patch, today())) return commitRules(habit, patch, "today");
@@ -1440,10 +1446,12 @@ function rulePromptRow(habit) {
 
 // The days it was archived become a break, so they do not count as missed.
 function restoreHabit(habit) {
-  const ops = [{ t: "habit", habit: { ...habit, archived: false, archivedAt: undefined } }];
-  const from = habit.archivedAt && addDays(habit.archivedAt, 1);
+  const current = data().habits.find((h) => h.id === habit.id);
+  if (!current) return;
+  const from = addDays(lastDay(data(), current, today()), 1);
   const to = addDays(today(), -1);
-  if (from && from <= to) ops.push({ t: "break", break: { id: uid(), from, to, habitId: habit.id } });
+  const ops = [{ t: "habit", habit: { ...current, archived: false, archivedAt: undefined } }];
+  if (from <= to) ops.push({ t: "break", break: { id: uid(), from, to, habitId: current.id, archived: true } });
   commitAll(ops);
 }
 
@@ -1513,7 +1521,7 @@ function editRow(habit) {
       "data-focus-key": `${habit.id}:unit`,
       oninput: () => patch({ unit: unit.value }, { quiet: true }),
       // Past amounts keep their numbers, so a new unit misreads them.
-      onchange: () => habit.start < today() && toast(t("unitChanged")),
+      onchange: () => habit.start < today() && habit.unit?.trim() && unit.value.trim() !== habit.unit.trim() && toast(t("unitChanged")),
     });
     fields.push(labelled(t("unit"), unit));
   }
@@ -1583,7 +1591,7 @@ function breakRow(item) {
   const who = el(
     "select",
     { class: "pill-select", "aria-label": t("habit"), "data-focus-key": `${item.id}:who`, onchange: () => save({ habitId: who.value }) },
-    [el("option", { value: "", textContent: t("allHabits") }), ...habits().filter((h) => h.type !== "avoid").map((h) => el("option", { value: h.id, textContent: habitName(h) }))],
+    [el("option", { value: "", textContent: t("allHabits") }), ...habits().filter((h) => h.type !== "avoid" || h.id === item.habitId).map((h) => el("option", { value: h.id, textContent: habitName(h) }))],
   );
   who.value = item.habitId ?? "";
   const date = (field, labelKey, ariaKey) => {

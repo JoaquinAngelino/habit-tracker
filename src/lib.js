@@ -79,8 +79,7 @@ function cleanEra(era) {
   return out;
 }
 
-// `past` holds the eras that ended, each with its last day in `until`; the habit's own fields rule after the last.
-// Older versions ignore `past`, so their edits only ever change the current era.
+// `past` holds ended eras by last day; older versions ignore it, so their edits change only the current era.
 const erasCache = new WeakMap();
 function erasOf(habit) {
   if (!Array.isArray(habit.past) || !habit.past.length) return [];
@@ -112,13 +111,11 @@ const sameRule = (a, b) => JSON.stringify(ruleOf(a)) === JSON.stringify(ruleOf(b
 
 export const changesRules = (habit, patch) => !sameRule(habit, { ...habit, ...patch });
 
-// Whether applying `patch` today needs a choice between starting new rules today and rewriting the old ones.
-// Once rules were changed today, later changes that day only adjust the new ones.
+// Once rules changed today, later changes that day only adjust the new ones without asking.
 export const asksRuleChoice = (habit, patch, today) =>
   habit.start < today && changesRules(habit, patch) && !erasOf(habit).some((e) => e.until >= addDays(today, -1));
 
-// The habit with `patch` applied: "today" ends the current rules yesterday, "current" rewrites them since they
-// began, and "all" rewrites every day since the habit started.
+// `scope`: "today" ends the current rules yesterday, "current" rewrites them, "all" drops every earlier era.
 export function withRules(habit, patch, today, scope) {
   const next = { ...habit, ...patch };
   if (scope === "all") return { ...next, past: undefined };
@@ -134,17 +131,18 @@ export function isScheduled(habit, date) {
   return !h.days?.length || h.days.includes(weekday(date));
 }
 
-// A break covers one habit or, with no habit named, all of them. Avoid habits keep counting through it.
-export const isOnBreak = (data, habit, date) =>
-  habitAt(habit, date).type !== "avoid" && (data.breaks ?? []).some((b) => (!b.habitId || b.habitId === habit.id) && b.from <= date && date <= b.to);
+// Avoid habits count through breaks, except one covering days they were archived.
+export function isOnBreak(data, habit, date) {
+  const avoid = habitAt(habit, date).type === "avoid";
+  return (data.breaks ?? []).some((b) => (avoid ? b.archived && b.habitId === habit.id : !b.habitId || b.habitId === habit.id) && b.from <= date && date <= b.to);
+}
 
 export function isOff(data, habit, date) {
   const h = habitAt(habit, date);
   return isOnBreak(data, h, date) || (canSchedule(h) && (isSkipped(data, h.id, date) || !isScheduled(h, date)));
 }
 
-// The last day an archived habit counts: the day it was archived, or its last entry when that is later, as when an
-// older version restored and archived it again without updating `archivedAt`.
+// Older versions restore and re-archive without updating `archivedAt`, so a later entry wins.
 export function lastDay(data, habit, today) {
   if (!habit.archived) return today;
   let end = isIsoDate(habit.archivedAt) ? habit.archivedAt : habit.start;
@@ -214,9 +212,8 @@ function typeRuns(habit) {
   return runs;
 }
 
-// The periods a habit is measured in from `from` to `to`, oldest first: days, or weeks and months keyed by their
-// first day, each judged by the rules of its last day. A type change starts a new `run`: the old type keeps the
-// periods that ended before it, and the period holding the change belongs to the new type.
+// Each period is judged by the rules of its last day. A type change starts a new `run`, which owns the period
+// holding the change.
 export function periodsOf(data, habit, from, to) {
   const out = [];
   const runs = typeRuns(habit);
@@ -230,15 +227,18 @@ export function periodsOf(data, habit, from, to) {
       if (next && end >= next.from) break;
       const rule = habitAt(habit, end);
       const met = periodMet(data, rule, d);
-      out.push({ start: d, end, unit, rule, run, met, off: !met && periodOff(data, rule, d) });
+      out.push({ start: d, end, unit, rule, run, met, off: (!met || rule.type === "avoid") && periodOff(data, rule, d) });
     }
   });
   return out;
 }
 
-// A period counts toward a rate unless it was off, or is still open on `last` and not met yet. A slip on an avoid
-// habit is final, so its day counts at once.
-export const countsTowardRate = (period, last) => period.met || !(period.off || (period.end >= last && period.rule.type !== "avoid"));
+// An open period counts once met, except an avoid habit's, whose slips are final.
+export function countsTowardRate(period, last) {
+  const avoid = period.rule.type === "avoid";
+  if (period.off) return period.met && !avoid;
+  return period.met || period.end < last || avoid;
+}
 
 // An unfinished current period does not break a streak yet; a slip on an avoid habit is final.
 const stillOpen = (period) => period.rule.type !== "avoid" && !period.met;
@@ -257,8 +257,9 @@ export function streak(data, habit, today) {
   let current = 0;
   const last = periods.at(-1);
   for (let i = last && stillOpen(last) ? periods.length - 2 : periods.length - 1; i >= 0 && periods[i].run === last.run; i--) {
+    if (periods[i].off) continue;
     if (periods[i].met) current++;
-    else if (!periods[i].off) break;
+    else break;
   }
   return { current, best, unit };
 }

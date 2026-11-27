@@ -335,3 +335,27 @@ test("recent levels follow each day's rules", () => {
   const data = dataWith(water, { "2026-11-23": { h: 4 } });
   assert.equal(recentLevels(data, water, TODAY, 1)[0], 4);
 });
+
+test("a week that starts as daily days and ends weekly counts both", () => {
+  const weekly = withRules(daily, { type: "weekly", target: 2 }, "2026-11-25", "today");
+  const data = dataWith(weekly, logOf("h", { "2026-11-23": 1, "2026-11-24": 1, "2026-11-26": 1 }));
+  const m = measureOf(data, [weekly], "2026-11-23", "2026-11-29", "2026-11-29");
+  assert.deepEqual([m.due, m.done, m.rows[0].longest], [3, 3, 2]);
+});
+
+test("a week met by an entry dated after today still counts today", () => {
+  const weekly = { ...daily, type: "weekly", target: 2 };
+  const data = dataWith(weekly, { "2026-11-23": { h: 1 }, "2026-11-25": { h: 1 } });
+  const m = measureOf(data, [weekly], "2026-11-23", TODAY);
+  assert.deepEqual([m.due, m.done], [1, 1]);
+});
+
+test("an avoid habit skips the days it was archived, but not other breaks", () => {
+  const avoid = { ...daily, type: "avoid" };
+  const data = dataWith(avoid);
+  data.breaks.push({ id: "a", from: "2026-11-05", to: "2026-11-20", habitId: "h", archived: true }, { id: "b", from: "2026-11-01", to: "2026-11-04", habitId: "" });
+  assert.equal(isOff(data, avoid, "2026-11-10"), true);
+  assert.equal(isOff(data, avoid, "2026-11-02"), false);
+  assert.deepEqual(streak(data, avoid, TODAY), { current: 8, best: 8, unit: "day" });
+  assert.equal(measureOf(data, [avoid], "2026-11-01", TODAY).rows[0].due, 8);
+});

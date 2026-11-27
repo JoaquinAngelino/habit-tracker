@@ -14,7 +14,9 @@ export function dueDays(data, habit, from, to, today, keep = () => true) {
     const rule = habitAt(habit, d);
     if (!keep(rule)) continue;
     const done = isDone(rule, entry(data, habit.id, d));
-    if (!done && (isOff(data, habit, d) || (d === today && rule.type !== "avoid"))) continue;
+    const avoid = rule.type === "avoid";
+    if ((!done || avoid) && isOff(data, habit, d)) continue;
+    if (!done && d === today && !avoid) continue;
     out.set(d, done);
   }
   return out;
