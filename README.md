@@ -23,6 +23,8 @@ A day off does not break the streak or count against the completion rate, and st
 
 ### Order, groups and times
 
+Changing a habit's type, target or days asks whether the change applies from today, so earlier days keep being counted as they were, or since its current rules began. Changes made later the same day follow that choice.
+
 The arrows in **Habits** set the order. A habit with a group, such as Morning, is listed with the rest of its group on **Today**, where **Mark all done** checks off the group's daily habits at once. A habit with a time of day shows it, and **Today** lists habits by time.
 
 ### Notes and mood
@@ -33,10 +35,11 @@ Each habit takes a note per day, and **Today → The day** takes a mood and an e
 
 Besides streaks, rates and the heatmap, **Progress** shows:
 
-- **Week**: what was due and done, against the week before, with tasks finished and average mood.
+- **Compare**: a day, week, month, year or chosen range, against the one before, the same one a year earlier, the average of the last few, or the best one so far. Figures include completion, check-offs, perfect days (everything due got done), active days, the longest streak, slips, mood, energy, and tasks done, on time and overdue, each with its change. While a period is still running it is compared with the same number of days of the other one, unless **Whole period** is picked. Tap a figure to see its trend over the last 12 periods, optionally next to the same periods a year earlier. Each habit shows its own change, and **Details** shows its trend, its best and worst periods, and for amounts how much was logged on each day. **Download CSV** saves what is shown, and **Settings → Download metrics** saves every month so far.
 - **By day of the week**: how often each habit got done on each weekday over the last 90 days.
 - **Patterns**: habits that tend to get done or missed on the same days, and habits whose done days have a different average mood. They need about two weeks of history.
-- **Year**: check-ins, active days, longest streak and totals for the year.
+
+Weekly and monthly habits count once per week or month, on its last day, or as soon as their target is met while it is still running. Archived habits still count in the periods before they were archived.
 
 **Share** on a habit makes a picture of its streak and last six months, shared through the phone's share sheet or downloaded.
 

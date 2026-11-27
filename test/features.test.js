@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { emptyData, applyOp, replay, merge, normalize, streak, rate, isOff, isDone, level, addMonths, nextDue, completeTask, reopenTask, rescheduled, timerMinutes, recentLevels, queue, hasData, reminderTimes } from "../src/lib.js";
-import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress, SHARED_WEEKS } from "../src/insights.js";
+import { weekdayPattern, correlations, moodLinks, sharedProgress, SHARED_WEEKS } from "../src/insights.js";
 import { toIcs } from "../src/ics.js";
 import { parseCsv, fromCsv, fromJson, importFile } from "../src/importer.js";
 
@@ -226,13 +226,6 @@ test("avoid habits are left out of links between habits and with mood", () => {
   assert.deepEqual(moodLinks(data, [run, smoking], TODAY).map((m) => m.habit.id), ["a"]);
 });
 
-test("the year recap counts an every-N streak on the days it was scheduled", () => {
-  const habit = { ...daily, start: "2025-12-31", every: 2 };
-  const data = dataWith(habit, {});
-  for (const date of ["2026-01-02", "2026-01-04", "2026-01-06", "2026-01-08"]) data.log[date] = { h: 1 };
-  assert.equal(yearRecap(data, [habit], 2026, "2026-01-08").streak.count, 4);
-});
-
 test("correlations find habits done on the same days", () => {
   const a = { ...daily, id: "a", name: "Run" };
   const b = { ...daily, id: "b", name: "Stretch" };
@@ -249,25 +242,6 @@ test("mood links compare the mood on done and missed days", () => {
   for (let i = 0; i < 23; i++) data.days[`2026-11-${String(1 + i).padStart(2, "0")}`] = { mood: i % 2 ? 4 : 2 };
   const [link] = moodLinks(data, [daily], TODAY);
   assert.deepEqual([link.done, link.missed, link.diff], [4, 2, 2]);
-});
-
-test("the week review counts what was due and done, and the year recap totals the year", () => {
-  const weekly = { ...daily, id: "w", type: "weekly", target: 3 };
-  const pages = { ...daily, id: "p", type: "amount", target: 10, unit: "pages" };
-  const data = dataWith([daily, weekly, pages], {
-    "2026-11-16": { h: 1, w: 1, p: 10 },
-    "2026-11-17": { h: 1, w: 1, p: 4 },
-    "2026-11-20": { h: 1 },
-  });
-  data.tasks.push({ id: "t", title: "x", done: "2026-11-18" });
-  data.days["2026-11-16"] = { mood: 5 };
-  const week = weekReview(data, [daily, weekly, pages], "2026-11-16", TODAY);
-  assert.deepEqual(week.rows.map((r) => [r.habit.id, r.done, r.due]), [["h", 3, 7], ["w", 2, 3], ["p", 1, 7]]);
-  assert.deepEqual([week.done, week.due, week.tasksDone, week.mood], [6, 17, 1, 5]);
-  const year = yearRecap(data, [daily, weekly, pages], 2026, TODAY);
-  assert.deepEqual([year.checkins, year.activeDays, year.tasksDone, year.top.habit.id, year.top.days], [7, 3, 1, "h", 3]);
-  assert.deepEqual(year.totals.map((x) => [x.habit.id, x.total]), [["p", 14]]);
-  assert.deepEqual([year.streak.habit.id, year.streak.count], ["h", 2]);
 });
 
 test("the calendar file has a repeating event per habit and an all-day one per dated task", () => {

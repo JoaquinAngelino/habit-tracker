@@ -24,6 +24,7 @@ const SHELL = [
   "src/importer.js",
   "src/insights.js",
   "src/lib.js",
+  "src/metrics.js",
   "src/server.js",
   "src/storage.js",
   "src/store.js",

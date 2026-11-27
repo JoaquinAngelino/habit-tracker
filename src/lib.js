@@ -61,18 +61,83 @@ export const isSkipped = (data, id, date) => Boolean(data.skips?.[date]?.[id]);
 // Fixed when the interval is chosen, so moving the start date leaves the days where they were.
 export const everyFrom = (habit) => habit.everyFrom ?? habit.start;
 
+// Fields that decide whether a day is due and done. A change to them can start a new era, so days already
+// past keep the rules they were logged under.
+export const RULE_FIELDS = ["type", "target", "days", "every", "everyFrom"];
+
+const ruleOf = (habit) => ({ type: habit.type, target: habit.target ?? 1, days: habit.days ?? [], every: habit.every ?? 0, everyFrom: everyFrom(habit) });
+
+// `past` holds the eras that ended, each with its last day in `until`; the habit's own fields rule after the last.
+// Older versions ignore `past`, so their edits only ever change the current era.
+const erasCache = new WeakMap();
+function erasOf(habit) {
+  if (!habit.past?.length) return null;
+  let eras = erasCache.get(habit);
+  if (!eras) {
+    eras = habit.past
+      .filter((e) => e?.until)
+      .sort((a, b) => (a.until < b.until ? -1 : a.until > b.until ? 1 : 0))
+      .map(({ until, ...rule }) => ({ until, habit: { ...habit, ...rule, past: undefined } }));
+    erasCache.set(habit, eras);
+  }
+  return eras;
+}
+
+export function habitAt(habit, date) {
+  const eras = erasOf(habit);
+  if (eras) for (const era of eras) if (date <= era.until) return era.habit;
+  return habit;
+}
+
+export function rulesSince(habit) {
+  const last = erasOf(habit)?.at(-1)?.until;
+  return last ? later(addDays(last, 1), habit.start) : habit.start;
+}
+
+const sameRule = (a, b) => JSON.stringify(ruleOf(a)) === JSON.stringify(ruleOf(b));
+
+export const changesRules = (habit, patch) => !sameRule(habit, { ...habit, ...patch });
+
+// The habit with `patch` applied. With `fromToday`, the rules it had until yesterday become an ended era; edits on
+// the same day after the first change only the new era.
+export function withRules(habit, patch, today, fromToday) {
+  const next = { ...habit, ...patch };
+  if (!fromToday || habit.start >= today || sameRule(habit, next)) return next;
+  const yesterday = addDays(today, -1);
+  const past = habit.past ?? [];
+  if (past.some((e) => e.until >= yesterday)) return next;
+  return { ...next, past: [...past, { until: yesterday, ...ruleOf(habit) }] };
+}
+
 export function isScheduled(habit, date) {
-  if (!canSchedule(habit)) return true;
-  if (habit.every > 1) return daysBetween(everyFrom(habit), date) % habit.every === 0;
-  return !habit.days?.length || habit.days.includes(weekday(date));
+  const h = habitAt(habit, date);
+  if (!canSchedule(h)) return true;
+  if (h.every > 1) return daysBetween(everyFrom(h), date) % h.every === 0;
+  return !h.days?.length || h.days.includes(weekday(date));
 }
 
 // A break covers one habit or, with no habit named, all of them. Avoid habits keep counting through it.
 export const isOnBreak = (data, habit, date) =>
-  habit.type !== "avoid" && (data.breaks ?? []).some((b) => (!b.habitId || b.habitId === habit.id) && b.from <= date && date <= b.to);
+  habitAt(habit, date).type !== "avoid" && (data.breaks ?? []).some((b) => (!b.habitId || b.habitId === habit.id) && b.from <= date && date <= b.to);
 
-export const isOff = (data, habit, date) =>
-  isOnBreak(data, habit, date) || (canSchedule(habit) && (isSkipped(data, habit.id, date) || !isScheduled(habit, date)));
+export function isOff(data, habit, date) {
+  const h = habitAt(habit, date);
+  return isOnBreak(data, h, date) || (canSchedule(h) && (isSkipped(data, h.id, date) || !isScheduled(h, date)));
+}
+
+// The last day a habit counts: today, or the day it was archived. One archived before that day was recorded
+// ends on its last entry.
+export function lastDay(data, habit, today) {
+  if (!habit.archived) return today;
+  let end = habit.archivedAt;
+  if (!end) {
+    end = habit.start;
+    for (const name of Object.values(HABIT_DAY_MAPS)) {
+      for (const [date, day] of Object.entries(data[name] ?? {})) if (day[habit.id] && date > end) end = date;
+    }
+  }
+  return end < today ? end : today;
+}
 
 // For an avoid habit the logged value marks a slip, so an empty day is a good one.
 export function isDone(habit, value) {
@@ -89,7 +154,7 @@ const PERIODS = {
   month: { start: monthStart, next: (d) => monthStart(addDays(d, 32)), prev: (d) => monthStart(addDays(d, -1)) },
 };
 
-const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
+export const periodOf = (habit) => (habit.type === "weekly" ? "week" : habit.type === "monthly" ? "month" : "day");
 
 // Times logged in the week or month that holds `date`; a day can count more than once.
 export function periodCount(data, habit, date) {
@@ -101,64 +166,98 @@ export function periodCount(data, habit, date) {
   return n;
 }
 
-// Weekly and monthly habits are measured per period, keyed by its first day; the rest per day.
-function periodRange(habit, from, to) {
-  const p = PERIODS[periodOf(habit)];
-  return { p, first: p.start(later(from, habit.start)), last: p.start(to) };
-}
-
-function periodMet(data, habit, date) {
-  if (periodOf(habit) !== "day") return periodCount(data, habit, date) >= (habit.target || 1);
-  return isDone(habit, entry(data, habit.id, date));
+// `rule` is a habit as `habitAt` returns it.
+function periodMet(data, rule, date) {
+  if (periodOf(rule) !== "day") return periodCount(data, rule, date) >= (rule.target || 1);
+  return isDone(rule, entry(data, rule.id, date));
 }
 
 // A week or month is off when a break touches it.
-function periodOff(data, habit, date) {
-  const p = PERIODS[periodOf(habit)];
-  if (p === PERIODS.day) return isOff(data, habit, date);
+function periodOff(data, rule, date) {
+  const p = PERIODS[periodOf(rule)];
+  if (p === PERIODS.day) return isOff(data, rule, date);
   if (!data.breaks?.length) return false;
-  for (let d = p.start(date), end = p.next(d); d < end; d = addDays(d, 1)) if (isOnBreak(data, habit, d)) return true;
+  for (let d = p.start(date), end = p.next(d); d < end; d = addDays(d, 1)) if (isOnBreak(data, rule, d)) return true;
   return false;
 }
 
+// Spans of days under one habit type, oldest first; the last one has no end.
+function typeRuns(habit) {
+  const runs = [];
+  let from = habit.start;
+  const add = (type, to) => {
+    if (runs.at(-1)?.type === type) runs.at(-1).to = to;
+    else runs.push({ type, from, to });
+  };
+  for (const era of erasOf(habit) ?? []) {
+    if (era.until < from) continue;
+    add(era.habit.type, era.until);
+    from = addDays(era.until, 1);
+  }
+  add(habit.type, null);
+  return runs;
+}
+
+// The periods a habit is measured in from `from` to `to`, oldest first: days, or weeks and months keyed by their
+// first day, each judged by the rules of its last day. A type change starts a new `run`, and a period it cuts
+// belongs to the new type.
+export function periodsOf(data, habit, from, to) {
+  const out = [];
+  const runs = typeRuns(habit);
+  runs.forEach((r, run) => {
+    const p = PERIODS[periodOf(r)];
+    const next = runs[run + 1];
+    const stop = next ? PERIODS[periodOf(next)].start(next.from) : null;
+    const lastStart = p.start(r.to && r.to < to ? r.to : to);
+    for (let d = p.start(later(from, r.from)); d <= lastStart; d = p.next(d)) {
+      if (stop && p.next(d) > stop) break;
+      const end = addDays(p.next(d), -1);
+      const rule = habitAt(habit, end);
+      const met = periodMet(data, rule, d);
+      out.push({ start: d, end, rule, run, met, off: !met && periodOff(data, rule, d) });
+    }
+  });
+  return out;
+}
+
 // An unfinished current period does not break a streak yet; a slip on an avoid habit is final.
-const stillOpen = (data, habit, last) => habit.type !== "avoid" && !periodMet(data, habit, last);
+const stillOpen = (period) => period.rule.type !== "avoid" && !period.met;
 
 export function streak(data, habit, today) {
-  const { p, first, last } = periodRange(habit, habit.start, today);
+  const periods = periodsOf(data, habit, habit.start, today);
   let best = 0;
-  let run = 0;
-  for (let d = first; d <= last; d = p.next(d)) {
-    const met = periodMet(data, habit, d);
-    if (!met && periodOff(data, habit, d)) continue;
-    run = met ? run + 1 : 0;
-    best = Math.max(best, run);
-  }
+  let count = 0;
+  periods.forEach((x, i) => {
+    if (i && x.run !== periods[i - 1].run) count = 0;
+    if (x.off) return;
+    count = x.met ? count + 1 : 0;
+    best = Math.max(best, count);
+  });
   let current = 0;
-  let d = stillOpen(data, habit, last) ? p.prev(last) : last;
-  for (; d >= first; d = p.prev(d)) {
-    if (periodMet(data, habit, d)) current++;
-    else if (!periodOff(data, habit, d)) break;
+  const last = periods.at(-1);
+  for (let i = last && stillOpen(last) ? periods.length - 2 : periods.length - 1; i >= 0 && periods[i].run === last.run; i--) {
+    if (periods[i].met) current++;
+    else if (!periods[i].off) break;
   }
   return { current, best, unit: periodOf(habit) };
 }
 
 export function rate(data, habit, today, days) {
-  const { p, first, last } = periodRange(habit, addDays(today, -(days - 1)), today);
+  const periods = periodsOf(data, habit, addDays(today, -(days - 1)), today);
   let hit = 0;
   let total = 0;
-  for (let d = first; d <= last; d = p.next(d)) {
-    const met = periodMet(data, habit, d);
-    if (!met && ((d === last && habit.type !== "avoid") || periodOff(data, habit, d))) continue;
+  periods.forEach((x, i) => {
+    if (!x.met && ((i === periods.length - 1 && x.rule.type !== "avoid") || x.off)) return;
     total++;
-    if (met) hit++;
-  }
+    if (x.met) hit++;
+  });
   return total ? hit / total : null;
 }
 
 // 0 = missed, 1–4 = how much got done, -1 = slipped (avoid habits), "off" = a day off, null = outside the habit's life.
 export function level(data, habit, date, today) {
   if (date > today || date < habit.start) return null;
+  habit = habitAt(habit, date);
   const v = entry(data, habit.id, date);
   if (!v && isOff(data, habit, date)) return "off";
   if (habit.type === "avoid") return v ? -1 : 4;
@@ -177,7 +276,8 @@ export function goalProgress(data, goal, habit, today) {
   let done = 0;
   for (let d = later(goal.start, habit.start); d <= end; d = addDays(d, 1)) {
     const v = entry(data, habit.id, d);
-    done += isAmount(habit) || periodOf(habit) !== "day" ? v : isDone(habit, v) ? 1 : 0;
+    const rule = habitAt(habit, d);
+    done += isAmount(rule) || periodOf(rule) !== "day" ? v : isDone(rule, v) ? 1 : 0;
   }
   const span = daysBetween(goal.start, goal.deadline) + 1;
   const elapsed = Math.min(span, Math.max(0, daysBetween(goal.start, today) + 1));

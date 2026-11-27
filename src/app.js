@@ -1,6 +1,7 @@
-import { $, el, icon, iconButton, mark, lane, toast, heatmap as heatmapGrid, heatmapLegend } from "./ui.js";
-import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes } from "./lib.js";
-import { weekdayPattern, correlations, moodLinks, weekReview, yearRecap, sharedProgress } from "./insights.js";
+import { $, el, icon, iconButton, mark, lane, toast, heatmap as heatmapGrid, heatmapLegend, lineChart, columnChart } from "./ui.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, withRules, changesRules, rulesSince } from "./lib.js";
+import { weekdayPattern, correlations, moodLinks, sharedProgress } from "./insights.js";
+import { UNITS, COMPARES, AVERAGE_OF, KPIS, LOWER_BETTER, kpiValue, rangeFor, comparisonRanges, buildFacts, measure, averageMeasure, bestRange, trendRanges, yearEarlier, habitExtremes, distribution, pastRanges, metricsCsv } from "./metrics.js";
 import { toIcs } from "./ics.js";
 import { importFile } from "./importer.js";
 import { drawCard } from "./card.js";
@@ -50,8 +51,11 @@ const ui = {
   // Habit or task just checked off, so only its tape plays the check-off.
   popped: null,
   shown: null,
-  weeksBack: 0,
-  year: null,
+  // What the Compare lane shows; `open` is the habit whose details are showing.
+  period: { unit: "week", back: 0, compare: "previous", full: false, from: null, to: null, kpi: "rate", group: "", overlay: false, open: null },
+  // A rule change waiting for "from today" or "since the rules began", and what was picked per habit today.
+  rulePrompt: null,
+  rulesPicked: {},
   timer: loadTimer(),
   accountNote: "",
   recovering: false,
@@ -216,7 +220,8 @@ const firstHabitLink = () => [`${t("noHabits")} `, el("a", { href: "#habits", te
 
 function setLog(habit, date, value) {
   const v = value > 0 ? value : 0;
-  if (habit.type !== "avoid" && isDone(habit, v) && !isDone(habit, entry(data(), habit.id, date))) ui.popped = habit.id;
+  const rule = habitAt(habit, date);
+  if (rule.type !== "avoid" && isDone(rule, v) && !isDone(rule, entry(data(), habit.id, date))) ui.popped = habit.id;
   store.commit({ t: "log", date, id: habit.id, v });
 }
 
@@ -526,24 +531,25 @@ function todayRow(habit, day) {
   const d = data();
   const value = entry(d, habit.id, day);
   const s = streakOf(habit);
+  const rule = habitAt(habit, day);
   const marks = [habit.time ? mark(habit.time) : null, mark(habitStreakText(habit, s), s.current ? "green" : null)];
   if (s.best > s.current) marks.push(mark(t("best", { units: units(s.best, s.unit) })));
-  if (habit.type === "weekly" || habit.type === "monthly") {
-    marks.push(mark(t(habit.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, habit, day), target: habit.target })));
+  if (rule.type === "weekly" || rule.type === "monthly") {
+    marks.push(mark(t(rule.type === "weekly" ? "thisWeek" : "thisMonth", { count: periodCount(d, rule, day), target: rule.target })));
   }
-  if (isAmount(habit) && unitOf(habit)) marks.push(mark(unitOf(habit)));
+  if (isAmount(rule) && unitOf(rule)) marks.push(mark(unitOf(rule)));
   const dayOff = isOff(d, habit, day);
   if (!value && dayOff) marks.push(mark(offMark(d, habit, day)));
   if (isSkipped(d, habit.id, day)) marks.push(textButton(t("undoSkip"), () => setSkip(habit, day, false), { small: true }));
-  else if (canSchedule(habit) && !isDone(habit, value) && !dayOff) marks.push(textButton(t("skip"), () => setSkip(habit, day, true), { small: true }));
+  else if (canSchedule(rule) && !isDone(rule, value) && !dayOff) marks.push(textButton(t("skip"), () => setSkip(habit, day, true), { small: true }));
 
   const noteInput = noteField(habit, day);
   if (!noteInput) marks.push(textButton(t("addNote"), () => openNote(habit, day), { small: true }));
 
   const actions = [];
-  if (habit.type === "timer") {
+  if (rule.type === "timer") {
     if (day === today()) actions.push(timerButton(habit));
-  } else if (habit.type === "amount" || habit.type === "weekly" || habit.type === "monthly") {
+  } else if (rule.type === "amount" || rule.type === "weekly" || rule.type === "monthly") {
     actions.push(
       iconButton("minus", t("oneLess"), () => setLog(habit, day, Math.max(0, value - 1)), { disabled: !value }),
       iconButton("plus", t("oneMore"), () => setLog(habit, day, value + 1)),
@@ -551,7 +557,7 @@ function todayRow(habit, day) {
   }
   return itemRow({
     id: habit.id,
-    tape: todayTape(habit, day, value),
+    tape: todayTape(rule, day, value),
     body: [el("p", { class: "item-title", textContent: habitName(habit) }), el("p", { class: "item-marks" }, marks), noteInput],
     side: actions.length ? el("div", { class: "item-actions" }, actions) : null,
   });
@@ -559,8 +565,8 @@ function todayRow(habit, day) {
 
 function groupLane(name, list, day) {
   const d = data();
-  const done = list.filter((h) => isDone(h, entry(d, h.id, day))).length;
-  const todo = list.filter((h) => h.type === "check" && !entry(d, h.id, day));
+  const done = list.filter((h) => isDone(habitAt(h, day), entry(d, h.id, day))).length;
+  const todo = list.filter((h) => habitAt(h, day).type === "check" && !entry(d, h.id, day));
   const log = (v) => todo.map((h) => ({ t: "log", date: day, id: h.id, v }));
   const doAll = () => undoable(t("markedDone", { count: todo.length }), log(1), () => commitAll(log(0)));
   return completed(lane("green", name, {
@@ -684,7 +690,7 @@ function todayView() {
   // A day off still lists the habit, apart, so it can be logged anyway; logging moves it back.
   const offHabits = started.filter((h) => !entry(data(), h.id, day) && isOff(data(), h, day));
   const due = started.filter((h) => !offHabits.includes(h));
-  const done = due.filter((h) => isDone(h, entry(data(), h.id, day))).length;
+  const done = due.filter((h) => isDone(habitAt(h, day), entry(data(), h.id, day))).length;
   const groups = [...new Set(due.map(groupOf).filter(Boolean))];
   const go = (to) => {
     ui.day = to;
@@ -879,30 +885,346 @@ async function streakCard(habit) {
 
 const insight = (text) => el("article", { class: "item" }, [el("p", { class: "item-title", textContent: text })]);
 
-function weekLane(active) {
-  const now = today();
-  const start = addDays(weekStart(now), -7 * ui.weeksBack);
-  const [week, before] = rememberAll("week", ui.weeksBack, () => [weekReview(data(), active, start, now), weekReview(data(), active, addDays(start, -7), now)]);
-  const delta = week.rate != null && before.rate != null ? Math.round((week.rate - before.rate) * 100) : null;
-  const short = { month: "short", day: "numeric" };
-  const move = (n) => {
-    ui.weeksBack += n;
+const factsOf = () => rememberAll("facts", "", () => buildFacts(data(), habits(), today()));
+
+const shortDay = { month: "short", day: "numeric" };
+const longDay = { month: "short", day: "numeric", year: "numeric" };
+
+function spanText(from, to) {
+  if (from === to) return fmtDay(from, longDay);
+  return `${fmtDay(from, from.slice(0, 4) === to.slice(0, 4) ? shortDay : longDay)} – ${fmtDay(to, longDay)}`;
+}
+
+function rangeText(unit, r, whole = r.cut >= r.to) {
+  if (!whole) return spanText(r.from, r.cut);
+  if (unit === "month") return fmtDay(r.from, { month: "long", year: "numeric" });
+  if (unit === "year") return r.from.slice(0, 4);
+  if (unit === "day") return fmtDay(r.from, { weekday: "short", ...longDay });
+  return spanText(r.from, r.to);
+}
+
+function tickText(unit, r) {
+  if (unit === "day") return fmtDay(r.from, { weekday: "narrow" });
+  if (unit === "month") return fmtDay(r.from, { month: "short" });
+  if (unit === "year") return r.from.slice(0, 4);
+  return fmtDay(r.from, shortDay);
+}
+
+const PERCENT_KPIS = new Set(["rate", "onTime"]);
+const SCALE_KPIS = new Set(["mood", "energy"]);
+
+function kpiText(key, v) {
+  if (v == null) return "–";
+  if (PERCENT_KPIS.has(key)) return percent(v);
+  if (key === "longest") return units(Math.round(v), "day");
+  return num(v);
+}
+
+function deltaMark(key, now, before) {
+  if (now == null || before == null) return null;
+  const diff = PERCENT_KPIS.has(key) ? Math.round((now - before) * 100) : Math.round((now - before) * 10) / 10;
+  if (!diff) return mark("±0");
+  const good = LOWER_BETTER.has(key) ? diff < 0 : diff > 0;
+  const text = `${diff > 0 ? "+" : "−"}${num(Math.abs(diff))}`;
+  return mark(PERCENT_KPIS.has(key) ? t("pts", { value: text }) : text, good ? "green" : "red");
+}
+
+function currentRange() {
+  const p = ui.period;
+  if (p.unit !== "custom") return rangeFor(p.unit, today(), { back: p.back });
+  p.to ??= today();
+  p.from ??= addDays(p.to, -29);
+  return rangeFor("custom", today(), { from: p.from, to: p.to, back: p.back });
+}
+
+const factsIn = (facts, group) => (group ? facts.filter((f) => groupOf(f.habit) === group) : facts);
+
+// The measure of the chosen range and what it is compared with, recomputed when the data or the choice changes.
+function compared() {
+  const p = ui.period;
+  const range = currentRange();
+  const key = JSON.stringify([p.unit, p.back, p.compare, p.full, p.from, p.to, p.group]);
+  return rememberAll("compare", key, () => {
+    const facts = factsIn(factsOf(), p.group);
+    const now = measure(data(), facts, range);
+    let before = null;
+    let label = "";
+    if (p.compare === "best") {
+      const best = p.unit === "custom" ? null : bestRange(data(), facts, p.unit, range);
+      if (best) {
+        before = best.measure;
+        label = t("bestWas", { period: rangeText(p.unit, best.range) });
+      }
+    } else {
+      const ranges = comparisonRanges(p.unit, range, p.compare, { full: p.full }).filter((r) => facts.some((f) => f.start <= r.cut));
+      if (ranges.length) {
+        before = averageMeasure(ranges.map((r) => measure(data(), facts, r)));
+        label = p.compare === "average" ? t("avgOfLabel", { count: ranges.length }) : rangeText(p.unit, ranges[0]);
+      }
+    }
+    return { range, facts, now, before, label };
+  });
+}
+
+function shownKpis(now, before) {
+  const has = (key) => kpiValue(now, key) != null || (before && kpiValue(before, key) != null);
+  return KPIS.filter((key) => {
+    if (key === "slips") return now.rows.some((r) => r.habit.type === "avoid") || now.slips > 0;
+    if (SCALE_KPIS.has(key) || key === "onTime") return has(key);
+    if (key === "tasksDone" || key === "overdue") return data().tasks.length > 0;
+    return true;
+  });
+}
+
+function kpiTile(key, now, before) {
+  const v = kpiValue(now, key);
+  const was = before ? kpiValue(before, key) : null;
+  const picked = ui.period.kpi === key;
+  return el("button", {
+    type: "button",
+    class: "kpi",
+    "aria-pressed": String(picked),
+    "data-focus-key": `kpi:${key}`,
+    onclick: () => {
+      ui.period.kpi = key;
+      render();
+    },
+  }, [
+    el("span", { class: "kpi-label", textContent: t(`kpi_${key}`) }),
+    el("span", { class: "kpi-value", textContent: kpiText(key, v) }),
+    el("span", { class: "kpi-delta" }, [deltaMark(key, v, was), before ? el("span", { class: "kpi-was", textContent: t("vsValue", { value: kpiText(key, was) }) }) : null]),
+  ]);
+}
+
+function periodTools() {
+  const p = ui.period;
+  const pick = (unit) => {
+    Object.assign(p, { unit, back: 0, open: null });
+    if (unit === "custom" && p.compare === "best") p.compare = "previous";
+    if (unit === "year" && p.compare === "lastYear") p.compare = "previous";
     render();
   };
-  const summary = el("article", { class: "item" }, [
-    el("dl", { class: "stats stats-wide" }, [
-      stat(t("completion"), percent(week.rate)),
-      stat(t("vsLastWeek"), delta == null ? "–" : `${delta > 0 ? "+" : ""}${delta}%`),
-      stat(t("tasksDoneLabel"), num(week.tasksDone)),
-      stat(t("mood"), week.mood == null ? "–" : num(week.mood)),
-    ]),
-    el("p", { class: "item-marks" }, week.rows.map((r) => mark(`${habitName(r.habit)} ${num(r.done)}/${num(r.due)}`, r.done >= r.due ? "green" : null))),
+  return [el("span", { class: "segmented", role: "group", "aria-label": t("periodUnit") }, UNITS.map((unit) =>
+    el("button", { type: "button", class: "segment", "aria-pressed": String(p.unit === unit), "data-focus-key": `unit:${unit}`, textContent: t(`unit_${unit}`), onclick: () => pick(unit) })))];
+}
+
+function periodNav(range) {
+  const p = ui.period;
+  const move = (n) => {
+    p.back = Math.max(0, p.back + n);
+    render();
+  };
+  return el("div", { class: "period-nav" }, [
+    iconButton("left", t("prevPeriod"), () => move(1), { "data-focus-key": "period:prev" }),
+    el("p", { class: "period-label", "aria-live": "polite", textContent: rangeText(p.unit, range, true) }),
+    iconButton("right", t("nextPeriod"), () => move(-1), { disabled: !p.back, "data-focus-key": "period:next" }),
   ]);
-  return lane("green", t("weekReview"), {
-    count: `${fmtDay(week.start, short)} – ${fmtDay(week.end, short)}`,
-    tools: [iconButton("left", t("prevWeek"), () => move(1)), iconButton("right", t("nextWeek"), () => move(-1), { disabled: !ui.weeksBack })],
-    rows: [summary],
+}
+
+function pillSelect(label, key, value, options, onchange) {
+  const select = el("select", { class: "pill-select", "aria-label": label, "data-focus-key": key, onchange: () => onchange(select.value) },
+    options.map(([v, text]) => el("option", { value: v, textContent: text })));
+  select.value = value;
+  return select;
+}
+
+function compareControls(range) {
+  const p = ui.period;
+  const set = (patch) => {
+    Object.assign(p, patch);
+    render();
+  };
+  const modes = COMPARES.filter((m) => !(m === "best" && p.unit === "custom") && !(m === "lastYear" && p.unit === "year"));
+  const controls = [
+    pillSelect(t("compareWith"), "period:compare", p.compare, modes.map((m) => [m, t(`cmp_${m}`, { count: AVERAGE_OF[p.unit] })]), (v) => set({ compare: v })),
+  ];
+  if (range.cut < range.to && p.compare !== "best") {
+    controls.push(pillSelect(t("countBy"), "period:full", p.full ? "full" : "same", [["same", t("sameDays")], ["full", t("wholePeriod")]], (v) => set({ full: v === "full" })));
+  }
+  const groups = [...new Set(habits().map(groupOf).filter(Boolean))].sort();
+  if (groups.length) {
+    controls.push(pillSelect(t("group"), "period:group", p.group, [["", t("allGroups")], ...groups.map((g) => [g, g])], (v) => set({ group: v, open: null })));
+  }
+  if (p.unit === "custom") {
+    const date = (field, label) => {
+      const input = el("input", {
+        type: "date",
+        value: p[field],
+        max: today(),
+        "aria-label": label,
+        "data-focus-key": `period:${field}`,
+        onchange: () => {
+          if (!input.value) return;
+          p[field] = input.value;
+          if (p.to < p.from) Object.assign(p, field === "from" ? { to: p.from } : { from: p.to });
+          set({ back: 0 });
+        },
+      });
+      return input;
+    };
+    controls.push(el("span", { class: "meta-group" }, [date("from", t("rangeFrom")), el("span", { class: "meta-label", textContent: "–" }), date("to", t("rangeTo"))]));
+  }
+  controls.push(textButton(t("downloadCsv"), downloadCompareCsv, { small: true }));
+  return el("div", { class: "item-meta compare-controls" }, controls);
+}
+
+function downloadCompareCsv() {
+  const { range, now, before, label } = compared();
+  const rows = before ? [now, before] : [now];
+  const csv = metricsCsv(rows, habitName, (m) => (m === now ? rangeText(ui.period.unit, range) : label));
+  download(new Blob([csv], { type: "text/csv" }), `habit-tracker-${range.from}-${range.cut}.csv`);
+}
+
+function exportMetrics() {
+  const facts = factsOf();
+  const ranges = [...pastRanges("month", facts, today()), rangeFor("month", today())];
+  const csv = metricsCsv(ranges.map((r) => measure(data(), facts, r)), habitName, (m) => fmtDay(m.from, { month: "long", year: "numeric" }));
+  download(new Blob([csv], { type: "text/csv" }), `habit-tracker-metrics-${today()}.csv`);
+}
+
+const trendLabel = (unit, r) => ({ short: tickText(unit, r), long: rangeText(unit, r) });
+
+function trendCharts(range, facts) {
+  const p = ui.period;
+  const key = JSON.stringify([p.unit, p.back, p.from, p.to, p.group]);
+  const [ranges, measures, earlierMeasures] = rememberAll("trend", key, () => {
+    const list = trendRanges(p.unit, range).filter((r, i, all) => i === all.length - 1 || facts.some((f) => f.start <= r.cut));
+    const earlierList = yearEarlier(p.unit, list);
+    return [list, list.map((r) => measure(data(), facts, r)), earlierList.map((r) => measure(data(), facts, r))];
   });
+  const kpi = p.kpi;
+  const series = [{ name: t("thisSeries"), tone: "green", values: measures.map((m) => kpiValue(m, kpi)) }];
+  if (p.overlay) series.push({ name: t("yearBefore"), tone: "muted", values: earlierMeasures.map((m) => kpiValue(m, kpi)) });
+  const scale = PERCENT_KPIS.has(kpi) ? { min: 0, max: 1 } : SCALE_KPIS.has(kpi) ? { min: 1, max: 5 } : { min: 0 };
+  const labels = ranges.map((r) => trendLabel(p.unit, r));
+  const overlay = el("label", { class: "meta-group check-label" }, [
+    el("input", { type: "checkbox", checked: p.overlay, "data-focus-key": "period:overlay", onchange: (e) => {
+      p.overlay = e.target.checked;
+      render();
+    } }),
+    el("span", { class: "meta-label", textContent: t("showYearBefore") }),
+  ]);
+  const out = [el("article", { class: "item" }, [
+    el("div", { class: "item-meta" }, [el("p", { class: "chart-title", textContent: t("trendOf", { metric: t(`kpi_${kpi}`), count: ranges.length }) }), overlay]),
+    lineChart({ label: t("trendOf", { metric: t(`kpi_${kpi}`), count: ranges.length }), labels, series, format: (v) => kpiText(kpi, v), ...scale, tableSummary: t("showTable") }),
+  ])];
+  if (!SCALE_KPIS.has(kpi) && measures.some((m) => m.mood != null || m.energy != null)) {
+    out.push(el("article", { class: "item" }, [
+      el("p", { class: "chart-title", textContent: t("moodEnergy") }),
+      lineChart({
+        label: t("moodEnergy"),
+        labels,
+        series: [{ name: t("mood"), tone: "mood", values: measures.map((m) => m.mood) }, { name: t("energy"), tone: "energy", values: measures.map((m) => m.energy) }],
+        format: num,
+        min: 1,
+        max: 5,
+        tableSummary: t("showTable"),
+      }),
+    ]));
+  }
+  return out;
+}
+
+function rowFigures(habit, row) {
+  if (!row) return { value: null, text: "–" };
+  if (habit.type === "avoid") return { value: row.slips, text: t("slipsCount", { count: Math.round(row.slips * 10) / 10 }), key: "slips" };
+  return { value: row.rate, text: percent(row.rate), key: "rate" };
+}
+
+function habitDetails(habit, range, facts, row) {
+  const p = ui.period;
+  const ranges = trendRanges(p.unit, range).filter((r, i, all) => i === all.length - 1 || r.to >= habit.start);
+  const measures = rememberAll(`habitTrend:${habit.id}`, JSON.stringify([p.unit, p.back, p.from, p.to]), () => ranges.map((r) => measure(data(), facts.filter((f) => f.habit.id === habit.id), r)));
+  const avoid = habit.type === "avoid";
+  const values = measures.map((m) => (m.rows[0] ? (avoid ? m.rows[0].slips : m.rows[0].rate) : null));
+  const extremes = p.unit === "custom" ? null : habitExtremes(data(), facts, habit.id, p.unit, range.from);
+  const bins = isAmount(habit) ? distribution(facts, habit.id, ranges[0].from, range.cut) : [];
+  const metric = avoid ? t("kpi_slips") : t("kpi_rate");
+  return el("div", { class: "habit-details" }, [
+    lineChart({
+      label: t("trendOf", { metric: `${habitName(habit)} · ${metric}`, count: ranges.length }),
+      labels: ranges.map((r) => trendLabel(p.unit, r)),
+      series: [{ name: metric, tone: avoid ? "red" : "green", values }],
+      format: avoid ? num : percent,
+      ...(avoid ? { min: 0 } : { min: 0, max: 1 }),
+      tableSummary: t("showTable"),
+    }),
+    extremes ? el("p", { class: "item-marks" }, [
+      mark(t("bestPeriod", { period: rangeText(p.unit, extremes.best), rate: percent(extremes.best.rate) }), "green"),
+      mark(t("worstPeriod", { period: rangeText(p.unit, extremes.worst), rate: percent(extremes.worst.rate) })),
+    ]) : null,
+    row && isAmount(habit) && row.average != null ? el("p", { class: "item-marks" }, [mark(t("amountSummary", { average: num(row.average), best: num(row.bestDay), unit: unitOf(habit) }))]) : null,
+    bins.length ? el("p", { class: "chart-title", textContent: t("distributionLabel", { count: ranges.length }) }) : null,
+    bins.length ? columnChart({ label: t("distributionLabel", { count: ranges.length }), bars: bins.map((b) => ({ label: `${num(b.from)}–${num(b.to)}`, value: b.count })) }) : null,
+  ]);
+}
+
+function compareRow(habit, row, was, range, facts) {
+  const p = ui.period;
+  const open = p.open === habit.id;
+  const now = rowFigures(habit, row);
+  const before = was === undefined ? null : rowFigures(habit, was);
+  const marks = [];
+  if (row?.due && habit.type === "avoid") marks.push(mark(t("cleanDays", { count: Math.round(row.clean * 10) / 10 })));
+  else if (row?.due) marks.push(mark(t("doneOfDue", { done: num(row.done), due: num(row.due) })));
+  else if (row?.total && !isAmount(habit)) marks.push(mark(t("loggedTimes", { count: Math.round(row.total * 10) / 10 })));
+  if (row && isAmount(habit) && row.total) marks.push(mark(`${num(row.total)} ${unitOf(habit)}`.trim()));
+  if (before && (before.value != null || now.value != null)) {
+    marks.push(el("span", { class: "meta-label", textContent: t("vsValue", { value: before.text }) }), deltaMark(now.key ?? before.key, now.value, before.value));
+  }
+  const toggle = el("button", {
+    type: "button",
+    class: "btn-text btn-small",
+    "aria-expanded": String(open),
+    "data-focus-key": `${habit.id}:details`,
+    textContent: t(open ? "hideDetails" : "details"),
+    onclick: () => {
+      p.open = open ? null : habit.id;
+      render();
+    },
+  });
+  return itemRow({
+    id: `cmp-${habit.id}`,
+    tape: el("span", { class: `tape item-tape${habit.type === "avoid" ? (row?.slips ? " is-slip" : " is-done") : row?.rate >= 1 ? " is-done" : ""}`, textContent: now.text }),
+    body: [el("p", { class: "item-title", textContent: habitName(habit) + (habit.archived ? ` · ${t("archived")}` : "") }), el("p", { class: "item-marks" }, [...marks, toggle])],
+    after: open ? [habitDetails(habit, range, facts, row)] : [],
+  });
+}
+
+function compareRows(now, before, range, facts) {
+  const was = new Map((before?.rows ?? []).map((r) => [r.habit.id, r]));
+  const change = (r) => {
+    const b = was.get(r.habit.id);
+    if (!b) return -1;
+    const key = r.habit.type === "avoid" ? "slips" : "rate";
+    return r[key] == null || b[key] == null ? -1 : Math.abs(r[key] - b[key]) / (key === "slips" ? Math.max(1, b.slips) : 1);
+  };
+  return now.rows
+    .filter((r) => r.due || r.slips || r.total)
+    .sort((a, b) => change(b) - change(a))
+    .map((r) => compareRow(r.habit, r, before ? was.get(r.habit.id) ?? null : undefined, range, facts));
+}
+
+function compareLane() {
+  const p = ui.period;
+  const { range, facts, now, before, label } = compared();
+  const rows = [periodNav(range), compareControls(range)];
+  const hasData = now.due || now.checkins || now.slips || now.tasksDone;
+  if (hasData) {
+    rows.push(el("article", { class: "item" }, [
+      before ? el("p", { class: "meta-label", textContent: t("comparedWith", { period: label }) }) : el("p", { class: "meta-label", textContent: t("noComparison") }),
+      el("div", { class: "kpis" }, shownKpis(now, before).map((key) => kpiTile(key, now, before))),
+      p.unit === "year" && (now.top || now.longest) ? el("p", { class: "item-marks" }, [
+        now.top ? mark(`${t("topHabit")}: ${habitName(now.top.habit)} · ${units(now.top.days, "day")}`, "green") : null,
+        now.longest ? mark(`${t("longestStreak")}: ${habitName(now.longest.habit)} · ${units(now.longest.count, "day")}`) : null,
+      ]) : null,
+    ]));
+    rows.push(...trendCharts(range, facts));
+    rows.push(...compareRows(now, before, range, facts));
+  } else {
+    rows.push(el("p", { class: "lane-empty", textContent: t("compareEmpty") }));
+  }
+  return lane("green", t("compare"), { tools: periodTools(), rows });
 }
 
 function patternsLane(active) {
@@ -912,39 +1234,6 @@ function patternsLane(active) {
     ...moods.map((m) => insight(t("moodLink", { habit: habitName(m.habit), done: num(m.done), missed: num(m.missed) }))),
   ];
   return lane("purple", t("patterns"), { rows, empty: t("patternsEmpty") });
-}
-
-function yearLane() {
-  const thisYear = Number(today().slice(0, 4));
-  const year = ui.year ?? thisYear;
-  const r = rememberAll("year", year, () => yearRecap(data(), habits(), year, today()));
-  const move = (n) => {
-    ui.year = year + n;
-    render();
-  };
-  const rows = [];
-  if (r.checkins || r.tasksDone || r.slips) {
-    rows.push(el("article", { class: "item" }, [
-      el("dl", { class: "stats stats-wide" }, [
-        stat(t("checkins"), num(r.checkins)),
-        stat(t("activeDays"), num(r.activeDays)),
-        stat(t("longestStreak"), r.streak ? units(r.streak.count, "day") : "–"),
-        stat(t("tasksDoneLabel"), num(r.tasksDone)),
-      ]),
-      el("p", { class: "item-marks" }, [
-        r.top ? mark(`${t("topHabit")}: ${habitName(r.top.habit)} · ${units(r.top.days, "day")}`, "green") : null,
-        r.streak ? mark(`${t("longestStreak")}: ${habitName(r.streak.habit)}`) : null,
-        ...r.totals.map((x) => mark(`${habitName(x.habit)}: ${num(x.total)} ${unitOf(x.habit)}`.trim())),
-        r.mood == null ? null : mark(`${t("mood")}: ${num(r.mood)}`),
-        r.slips ? mark(`${t("slipsLabel")}: ${num(r.slips)}`) : null,
-      ]),
-    ]));
-  }
-  return lane("yellow", t("yearTitle", { year }), {
-    tools: [iconButton("left", t("prevYear"), () => move(-1)), iconButton("right", t("nextYear"), () => move(1), { disabled: year >= thisYear })],
-    rows,
-    empty: t("yearEmpty"),
-  });
 }
 
 function habitKind(habit) {
@@ -999,7 +1288,7 @@ function progressView() {
   if (ui.goalDraft && active.length) rows.push(goalForm(active));
   const historyOpen = (h) => ui.statsOpen[h.id] ?? active.length <= 3;
   return [
-    active.length ? weekLane(active) : null,
+    habits().length ? compareLane() : null,
     lane("purple", t("goals"), {
       count: goals.length ? t("goals", { count: goals.length }) : "",
       tools: active.length && !ui.goalDraft ? [textButton(t("addGoal"), () => startGoal(active), { plus: true })] : [],
@@ -1012,7 +1301,6 @@ function progressView() {
       empty: firstHabitLink(),
     }),
     active.length ? patternsLane(active) : null,
-    habits().length ? yearLane() : null,
   ];
 }
 
@@ -1107,9 +1395,45 @@ function habitSummary(habit) {
 const labelled = (label, input, after = "") =>
   el("label", { class: "meta-group" }, [el("span", { class: "meta-label", textContent: label }), input, after ? el("span", { class: "meta-label", textContent: after }) : null]);
 
+// A change to how days are counted asks once a day per habit whether it starts today or covers the current rules' whole span.
+function patchRules(habit, patch) {
+  const now = today();
+  const picked = ui.rulesPicked[habit.id];
+  const startedToday = (habit.past ?? []).some((e) => e.until >= addDays(now, -1));
+  if (habit.start >= now || !changesRules(habit, patch) || startedToday) return commitRules(habit, patch, true);
+  if (picked?.day === now) return commitRules(habit, patch, picked.fromToday);
+  ui.rulePrompt = { id: habit.id, patch };
+  render();
+}
+
+function commitRules(habit, patch, fromToday) {
+  const current = data().habits.find((h) => h.id === habit.id);
+  if (!current) return;
+  ui.rulePrompt = null;
+  if (changesRules(current, patch)) ui.rulesPicked[habit.id] = { day: today(), fromToday };
+  store.commit({ t: "habit", habit: withRules(current, patch, today(), fromToday) });
+}
+
+function rulePromptRow(habit) {
+  const { patch } = ui.rulePrompt;
+  const since = fmtDay(rulesSince(habit), { month: "short", day: "numeric", year: "numeric" });
+  return el("div", { class: "rule-prompt", role: "group", "aria-label": t("rulesPrompt") }, [
+    el("p", { class: "hint", textContent: t("rulesPrompt") }),
+    el("div", { class: "row" }, [
+      el("button", { type: "button", class: "btn", "data-focus-key": `${habit.id}:rulesToday`, textContent: t("rulesFromToday"), onclick: () => commitRules(habit, patch, true) }),
+      textButton(t("rulesSinceDate", { date: since }), () => commitRules(habit, patch, false), { small: true }),
+      textButton(t("cancel"), () => {
+        ui.rulePrompt = null;
+        render();
+      }, { small: true }),
+    ]),
+  ]);
+}
+
 function editRow(habit) {
   const open = ui.openHabit === habit.id;
   const patch = (p, opts) => patchHabit(habit.id, p, opts);
+  const patchRule = (p) => patchRules(habit, p);
   const peers = peersOf(habit);
   const at = peers.findIndex((h) => h.id === habit.id);
   const editorId = `habit-${habit.id}`;
@@ -1128,7 +1452,7 @@ function editRow(habit) {
   const head = el("div", { class: "edit-row" }, [
     toggle,
     el("div", { class: "item-actions" }, [
-      habit.archived ? textButton(t("restore"), () => patch({ archived: false }), { small: true }) : null,
+      habit.archived ? textButton(t("restore"), () => patch({ archived: false, archivedAt: undefined }), { small: true }) : null,
       iconButton("up", t("moveUp"), () => moveHabit(habit, -1), { disabled: at === 0, "data-focus-key": `${habit.id}:up` }),
       iconButton("down", t("moveDown"), () => moveHabit(habit, 1), { disabled: at === peers.length - 1, "data-focus-key": `${habit.id}:down` }),
     ]),
@@ -1146,7 +1470,7 @@ function editRow(habit) {
   });
   const type = el(
     "select",
-    { class: "pill-select", "data-focus-key": `${habit.id}:type`, onchange: () => patch({ type: type.value, target: DEFAULT_TARGET[type.value] }) },
+    { class: "pill-select", "data-focus-key": `${habit.id}:type`, onchange: () => patchRule({ type: type.value, target: DEFAULT_TARGET[type.value] }) },
     TYPES.map((k) => el("option", { value: k, textContent: t(`type_${k}`) })),
   );
   type.value = habit.type;
@@ -1160,7 +1484,7 @@ function editRow(habit) {
       inputMode: "decimal",
       value: habit.target,
       "data-focus-key": `${habit.id}:target`,
-      onchange: () => patch({ target: Number(target.value) > 0 ? Number(target.value) : 1 }),
+      onchange: () => patchRule({ target: Number(target.value) > 0 ? Number(target.value) : 1 }),
     });
     fields.push(labelled(t("target"), target, t({ weekly: "timesWeek", monthly: "timesMonth", amount: "aDay", timer: "minDay" }[habit.type])));
   }
@@ -1189,7 +1513,7 @@ function editRow(habit) {
     onchange: () => patch({ time: time.value }),
   });
   fields.push(labelled(t("at"), time));
-  if (canSchedule(habit)) fields.push(...scheduleFields(habit, patch));
+  if (canSchedule(habit)) fields.push(...scheduleFields(habit, patchRule));
   const group = el("input", {
     class: "unit-input",
     value: habit.group ?? "",
@@ -1205,7 +1529,7 @@ function editRow(habit) {
   const archive = () => {
     const now = data().habits.find((h) => h.id === habit.id);
     ui.openHabit = null;
-    undoable(t("archivedName", { name: habitName(now) }), [{ t: "habit", habit: { ...now, archived: true } }], () => patchHabit(habit.id, { archived: false }));
+    undoable(t("archivedName", { name: habitName(now) }), [{ t: "habit", habit: { ...now, archived: true, archivedAt: today() } }], () => patchHabit(habit.id, { archived: false, archivedAt: undefined }));
   };
   const remove = () => {
     ui.openHabit = null;
@@ -1223,6 +1547,8 @@ function editRow(habit) {
     el("div", { class: "habit-editor", id: editorId }, [
       labelled(t("habitName"), name),
       el("div", { class: "item-meta" }, fields),
+      ui.rulePrompt?.id === habit.id ? rulePromptRow(habit) : null,
+      habit.past?.length ? el("p", { class: "item-marks" }, [mark(t("rulesSinceMark", { date: fmtDay(rulesSince(habit), { month: "short", day: "numeric", year: "numeric" }) }))]) : null,
       el("div", { class: "row" }, actions),
     ]),
   ]);
@@ -1790,6 +2116,7 @@ function initSettings() {
     store.sync();
   });
   $("#exportData").addEventListener("click", exportData);
+  $("#exportMetrics").addEventListener("click", exportMetrics);
   $("#calendarFile").addEventListener("click", () => download(new Blob([toIcs(data())], { type: "text/calendar" }), "habit-tracker.ics"));
   const picker = $("#importFile");
   $("#importData").addEventListener("click", () => picker.click());
