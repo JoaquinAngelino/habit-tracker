@@ -1,5 +1,8 @@
-// Network first, so a deploy shows on the next load; the cache answers only when offline.
+// Network first, so a deploy shows on the next load; the cache answers when offline or when a page is slow to arrive.
 const CACHE = "habit-tracker";
+const SLOW_AFTER = 3000;
+// Pages opened from the cache take their files from it too, so versions never mix.
+const fromCache = new Set();
 const SHELL = [
   "./",
   "index.html",
@@ -43,19 +46,46 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
+const cachedFor = (request) => caches.match(request, { ignoreSearch: true });
+
+async function fromNetwork(request) {
+  const response = await fetch(request);
+  if (response.ok) {
+    const copy = response.clone();
+    caches.open(CACHE).then((cache) => cache.put(request, copy));
+  }
+  return response;
+}
+
+const offline = async (request) => (await cachedFor(request)) ?? (request.mode === "navigate" ? caches.match("./") : Response.error());
+
+async function openPage(request, id) {
+  const network = fromNetwork(request);
+  // Once the cache has answered, a late failure has nobody left to tell.
+  network.catch(() => {});
+  let timer;
+  const slow = new Promise((resolve) => (timer = setTimeout(resolve, SLOW_AFTER)));
+  try {
+    const first = await Promise.race([network, slow]);
+    if (first) return first;
+    const cached = await cachedFor(request);
+    if (!cached) return await network;
+    fromCache.add(id);
+    return cached;
+  } catch {
+    fromCache.add(id);
+    return offline(request);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 self.addEventListener("fetch", (event) => {
-  const { request } = event;
+  const { request, clientId, resultingClientId } = event;
   if (request.method !== "GET" || new URL(request.url).origin !== location.origin) return;
+  if (request.mode === "navigate") return event.respondWith(openPage(request, resultingClientId));
   event.respondWith(
-    fetch(request)
-      .then((response) => {
-        if (response.ok) {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, copy));
-        }
-        return response;
-      })
-      .catch(async () => (await caches.match(request, { ignoreSearch: true })) ?? (request.mode === "navigate" ? caches.match("./") : Response.error())),
+    (async () => (fromCache.has(clientId) && (await cachedFor(request))) || fromNetwork(request).catch(() => offline(request)))(),
   );
 });
 

@@ -292,6 +292,14 @@ test("CSV import reads semicolon-separated files and makes no habit from a colum
   assert.deepEqual(out.log, { "2026-11-20": { s0: 1.5 }, "2026-11-21": { s0: 1 } });
 });
 
+test("CSV import reads thousands separators where commas separate columns, and decimal commas elsewhere", () => {
+  const env = { uid: () => "n", today: TODAY };
+  const comma = fromCsv('Date,Steps\n2026-11-20,"8,000"\n2026-11-21,"1,234,567.5"\n2026-11-22,"7,5"\n2026-11-23,"0,500"\n', emptyData(), env);
+  assert.deepEqual(comma.log, { "2026-11-20": { n: 8000 }, "2026-11-21": { n: 1234567.5 }, "2026-11-22": { n: 7.5 }, "2026-11-23": { n: 0.5 } });
+  const semicolon = fromCsv("Date;Km\n2026-11-20;1,250\n", emptyData(), env);
+  assert.deepEqual(semicolon.log, { "2026-11-20": { n: 1.25 } });
+});
+
 test("JSON import takes a downloaded file and rejects anything else", () => {
   const data = dataWith(daily, { [TODAY]: { h: 1 } });
   assert.deepEqual(fromJson(JSON.stringify(data)), normalize(data));

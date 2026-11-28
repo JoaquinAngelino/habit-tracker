@@ -31,22 +31,62 @@ export const uid = () => Math.random().toString(36).slice(2, 10);
 
 export const emptyData = () => ({ v: 1, habits: [], log: {}, skips: {}, notes: {}, days: {}, breaks: [], goals: [], tasks: [] });
 
+const textOr = (fallback) => (v) => (typeof v === "string" ? v : fallback);
+const dateOr = (fallback) => (v) => (isIsoDate(v) ? v : fallback);
+
+// `item` itself when nothing needs fixing.
+function repair(item, rules) {
+  let out = item;
+  for (const [field, fix] of Object.entries(rules)) {
+    const value = fix(item[field]);
+    if (value !== item[field]) out = { ...out, [field]: value };
+  }
+  return out;
+}
+
+const optional = (valid) => (v) => (valid(v) ? v : undefined);
+const optionalText = optional((v) => typeof v === "string");
+
+function repairHabit(habit, log) {
+  const firstLogged = () => Object.keys(log).filter((date) => isIsoDate(date) && log[date][habit.id]).sort()[0];
+  return repair(habit, {
+    name: textOr(""),
+    start: (v) => (isIsoDate(v) ? v : firstLogged() ?? localIso()),
+    unit: optionalText,
+    group: optionalText,
+    time: optionalText,
+    days: optional(Array.isArray),
+    everyFrom: optional(isIsoDate),
+  });
+}
+
+function repairSteps(steps) {
+  if (!Array.isArray(steps)) return undefined;
+  const out = steps.filter((s) => s?.id).map((s) => repair(s, { title: textOr("") }));
+  return out.length === steps.length && out.every((s, i) => s === steps[i]) ? steps : out;
+}
+
+const repairTask = (task) => repair(task, { title: textOr(""), due: (v) => (v === undefined ? v : dateOr("")(v)), steps: repairSteps });
+
 // Unknown fields and habit types are kept, so an older version never drops what a newer one saved.
 export function normalize(data) {
   if (!data || typeof data !== "object") return emptyData();
   const list = (items) => (Array.isArray(items) ? items : []);
-  const map = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+  const isMap = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  const map = (value) => (isMap(value) ? value : {});
+  const dayMap = (value) => Object.fromEntries(Object.entries(map(value)).filter(([, day]) => isMap(day)));
+  const log = dayMap(data.log);
   return {
     ...data,
     v: 1,
-    habits: list(data.habits).filter((h) => h?.id),
+    habits: list(data.habits).filter((h) => h?.id).map((h) => repairHabit(h, log)),
     goals: list(data.goals).filter((g) => g?.id && g.habitId),
-    tasks: list(data.tasks).filter((x) => x?.id),
+    tasks: list(data.tasks).filter((x) => x?.id).map(repairTask),
     breaks: list(data.breaks).filter((b) => b?.id && b.from && b.to),
-    log: map(data.log),
-    skips: map(data.skips),
-    notes: map(data.notes),
-    days: map(data.days),
+    log,
+    skips: dayMap(data.skips),
+    notes: dayMap(data.notes),
+    days: dayMap(data.days),
   };
 }
 
@@ -292,6 +332,8 @@ export function recentLevels(data, habit, today, weeks) {
   const first = addDays(weekStart(today), -7 * (weeks - 1));
   return Array.from({ length: weeks * 7 }, (_, i) => level(data, habit, addDays(first, i), today));
 }
+
+export const isDatedGoal = (goal) => isIsoDate(goal.start) && isIsoDate(goal.deadline);
 
 export function goalProgress(data, goal, habit, today) {
   const end = goal.deadline < today ? goal.deadline : today;

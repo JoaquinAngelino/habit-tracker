@@ -44,10 +44,13 @@ const isoDate = (value) => {
   return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : null;
 };
 
-function amount(value) {
+const THOUSANDS = /^-?[1-9]\d{0,2}(,\d{3})+(\.\d+)?$/;
+
+// Where commas separate columns, one inside a number groups thousands; elsewhere it marks decimals.
+function amount(value, delimiter) {
   const v = value.toLowerCase();
   if (["yes", "true", "x", "done", "✓"].includes(v)) return 1;
-  const n = Number(v.replace(",", "."));
+  const n = Number(delimiter === "," && THOUSANDS.test(v) ? v.replaceAll(",", "") : v.replace(",", "."));
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -55,12 +58,12 @@ const column = (names, wanted) => names.findIndex((n) => wanted.includes(n));
 
 // One row per entry: Habitify's check-in log (Habit, Date) and Streaks' export (title, entry_date, entry_type,
 // quantity), where only completed entries count and skipped ones become skips.
-function rowEntries(rows, at) {
+function rowEntries(rows, at, delimiter) {
   const entries = [];
   for (const r of rows) {
     const entry = { date: isoDate(r[at.date] ?? ""), name: r[at.habit] ?? "" };
     const type = at.type >= 0 ? (r[at.type] ?? "").toLowerCase() : "completed";
-    const value = at.value >= 0 ? amount(r[at.value] ?? "") : 1;
+    const value = at.value >= 0 ? amount(r[at.value] ?? "", delimiter) : 1;
     if (type.startsWith("completed")) entries.push({ ...entry, value: at.type >= 0 ? value || 1 : value });
     else if (type.startsWith("skip")) entries.push({ ...entry, value: 0, skipped: true });
   }
@@ -71,11 +74,11 @@ function rowEntries(rows, at) {
 const fromLoop = ({ value, ...entry }) => ({ ...entry, value: value === 2 ? 1 : 0, skipped: value === 3 });
 
 // One column per habit.
-function columnEntries(head, rows, dateAt) {
+function columnEntries(head, rows, dateAt, delimiter) {
   const entries = [];
   for (const r of rows) {
     head.forEach((name, i) => {
-      if (i !== dateAt && name) entries.push({ date: isoDate(r[dateAt] ?? ""), name, value: amount(r[i] ?? "") });
+      if (i !== dateAt && name) entries.push({ date: isoDate(r[dateAt] ?? ""), name, value: amount(r[i] ?? "", delimiter) });
     });
   }
   return entries;
@@ -94,8 +97,9 @@ export function fromCsv(text, data, { uid, today, loop = false }) {
     type: names.indexOf("entry_type"),
   };
   if (at.date < 0) throw formatError();
-  const columns = () => columnEntries(head, rows, at.date);
-  const read = at.habit >= 0 ? rowEntries(rows, at) : loop ? columns().map(fromLoop) : columns();
+  const delimiter = delimiterOf(text);
+  const columns = () => columnEntries(head, rows, at.date, delimiter);
+  const read = at.habit >= 0 ? rowEntries(rows, at, delimiter) : loop ? columns().map(fromLoop) : columns();
   const entries = read.filter((e) => e.date && e.date <= today && e.name);
   if (!entries.length) throw formatError();
 

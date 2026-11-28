@@ -264,6 +264,13 @@ test("a passkey makes an account and signs back in to it", async () => {
   assert.equal((await register(passkey)).status, 409);
 });
 
+test("a passkey that cannot be stored leaves no account behind", async (t) => {
+  t.mock.method(console, "error", () => {});
+  env.DB.sql.exec("CREATE TRIGGER no_passkeys BEFORE INSERT ON passkeys BEGIN SELECT RAISE(ABORT, 'no'); END");
+  assert.equal((await register(await newPasskey())).status, 500);
+  assert.equal(env.DB.sql.prepare("SELECT COUNT(*) AS n FROM users").get().n, 0);
+});
+
 test("a passkey added while signed in opens that same account", async () => {
   const token = await signIn();
   await put(token, 0, "google data");
@@ -341,6 +348,7 @@ test("a published link is readable by anyone with its address, keeps the address
   assert.match(first.body.token, /^[\w-]{32}$/);
   const read = await worker.fetch(new Request(`https://api.test/feed/${first.body.token}.ics`), env);
   assert.deepEqual([read.status, read.headers.get("Content-Type"), await read.text()], [200, "text/calendar; charset=utf-8", "BEGIN:VCALENDAR"]);
+  assert.equal(read.headers.get("X-Content-Type-Options"), "nosniff");
   assert.equal((await call("PUT", "/link/feed", { token, bytes: enc("again") })).body.token, first.body.token);
   const share = await call("POST", "/link/share", { token, bytes: enc("sealed") });
   assert.notEqual(share.body.token, first.body.token);

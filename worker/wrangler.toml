@@ -10,6 +10,13 @@ ALLOWED_ORIGINS = "https://joaquinangelino.github.io,http://localhost:8765"
 VAPID_PUBLIC_KEY = ""
 VAPID_SUBJECT = "https://joaquinangelino.github.io/habit-tracker/"
 
+[observability]
+enabled = true
+
+# Request URLs carry the tokens of published links, so only what the worker logs itself is kept.
+[observability.logs]
+invocation_logs = false
+
 [triggers]
 crons = ["* * * * *"]
 

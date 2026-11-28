@@ -1,5 +1,5 @@
 import { $, el, icon, iconButton, mark, lane, toast, heatmap as heatmapGrid, heatmapLegend, lineChart, columnChart } from "./ui.js";
-import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, lastDay, withRules, changesRules, asksRuleChoice, hasPastRules, rulesSince } from "./lib.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, lastDay, withRules, changesRules, asksRuleChoice, hasPastRules, rulesSince, isDatedGoal } from "./lib.js";
 import { weekdayPattern, correlations, moodLinks, sharedProgress } from "./insights.js";
 import { UNITS, AVERAGE_OF, KPIS, GLOBAL_KPIS, LOWER_BETTER, comparesFor, kpiValue, rangeFor, compare, habitFacts, measure, rangesWithData, trendRanges, yearEarlier, habitExtremes, distribution, pastRanges, metricsCsv } from "./metrics.js";
 import { toIcs } from "./ics.js";
@@ -1297,7 +1297,7 @@ function startGoal(choices) {
 function progressView() {
   const active = activeHabits();
   const byId = new Map(habits().map((h) => [h.id, h]));
-  const goals = data().goals.filter((g) => byId.has(g.habitId));
+  const goals = data().goals.filter((g) => byId.has(g.habitId) && isDatedGoal(g));
   const rows = goals.map((g) => goalRow(g, byId.get(g.habitId)));
   if (ui.goalDraft && active.length) rows.push(goalForm(active));
   const historyOpen = (h) => ui.statsOpen[h.id] ?? active.length <= 3;
@@ -1737,6 +1737,12 @@ function changeLanguage(lang) {
   paintSettings();
   render();
   paintStatus();
+}
+
+// A new day moves Today along, unless an earlier day was being looked at.
+function rollOver() {
+  if (ui.day === ui.lastSeenDay) ui.day = today();
+  ui.lastSeenDay = today();
 }
 
 function exportData() {
@@ -2206,8 +2212,7 @@ document.addEventListener("visibilitychange", () => {
     if (store.hasPending()) store.sync();
     return;
   }
-  if (ui.day === ui.lastSeenDay) ui.day = today();
-  ui.lastSeenDay = today();
+  rollOver();
   render();
   store.refresh();
 });
@@ -2218,6 +2223,10 @@ window.addEventListener("storage", (e) => {
   render();
 });
 setInterval(() => {
+  if (ui.lastSeenDay !== today()) {
+    rollOver();
+    render();
+  }
   const node = ui.timer && document.querySelector("[data-timer]");
   if (node) node.textContent = timerLabel();
 }, 1000);

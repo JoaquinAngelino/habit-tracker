@@ -210,8 +210,8 @@ async function passkeyRegister(request, env) {
   const userId = session?.userId ?? crypto.randomUUID();
   // Counted only once the request has passed every check, so refused ones cannot use up the cap.
   if (!session) await limitRate(env, "all POST /passkey/register");
-  if (!session) await env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${userId}`, now).run();
   await env.DB.batch([
+    ...(session ? [] : [env.DB.prepare("INSERT INTO users (id, google_sub, created_at) VALUES (?, ?, ?)").bind(userId, `passkey:${userId}`, now)]),
     env.DB.prepare("INSERT INTO passkeys (credential_id, user_id, public_key, created_at) VALUES (?, ?, ?, ?)").bind(credentialId, userId, key.buffer, now),
     endOtherSessions(env, userId, session?.hash),
   ]);
@@ -378,7 +378,7 @@ async function deleteLink(env, userId, kind) {
 async function readLink(env, kind, token) {
   const link = await env.DB.prepare("SELECT body FROM links WHERE token = ? AND kind = ?").bind(token, kind).first();
   if (!link) throw new HttpError(404, "Not found");
-  return new Response(toBytes(link.body), { headers: { "Content-Type": LINK_TYPES[kind], "Cache-Control": "no-store" } });
+  return new Response(toBytes(link.body), { headers: { "Content-Type": LINK_TYPES[kind], "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 }
 
 async function writeRecovery(request, env, userId) {

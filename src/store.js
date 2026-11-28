@@ -120,6 +120,8 @@ export function createStore({ config, onChange, onStatus }) {
   }
 
   async function load(rereadPending) {
+    // Cleared first, so a save made while this reads marks the tab stale again.
+    stale = false;
     useIdb = await idb.usable();
     let copy = null;
     try {
@@ -131,7 +133,6 @@ export function createStore({ config, onChange, onStatus }) {
     const { migrate, ...fields } = copy ?? {};
     cache = { ...emptyCopy(), ...fields, pending: rereadPending ? loadPending() : cache.pending };
     setView(replay(cache.base, cache.pending));
-    stale = false;
     if (migrate && (await saveCopy())) savePending();
   }
 
@@ -140,6 +141,8 @@ export function createStore({ config, onChange, onStatus }) {
   // Another tab saved: this one reloads before it shows or saves anything stale.
   async function reload() {
     resets++;
+    // A sync under way drops its results, so it has to run again.
+    if (running) resyncQueued = true;
     loading = load(true);
     await loading;
     onChange();
@@ -147,6 +150,8 @@ export function createStore({ config, onChange, onStatus }) {
   globalThis.addEventListener?.("storage", (e) => {
     if (![PENDING_KEY, CHANGED_KEY, LOCAL_COPY_KEY, null].includes(e.key)) return;
     stale = true;
+    // Read at once: the next edit here writes this list back, and must not drop the other tab's.
+    if (e.key === PENDING_KEY || e.key === null) cache.pending = loadPending();
     if (globalThis.document?.visibilityState === "visible") reload();
   });
 
@@ -179,6 +184,8 @@ export function createStore({ config, onChange, onStatus }) {
     running = (async () => {
       await loading;
       do {
+        if (stale) await reload();
+        await loading;
         resyncQueued = false;
         await syncPass();
       } while (resyncQueued);
@@ -260,7 +267,11 @@ export function createStore({ config, onChange, onStatus }) {
           }
         }
         // Results are dropped after a sign-out, or when another tab saved meanwhile; the server has them.
-        if (start !== resets || stale) return;
+        if (start !== resets) return;
+        if (stale) {
+          resyncQueued = true;
+          return;
+        }
         const pushed = new Set(sent);
         const unsent = () => cache.pending.filter((op) => !pushed.has(op));
         Object.assign(cache, { base: next, version, bytes, merging: false });
@@ -306,7 +317,7 @@ export function createStore({ config, onChange, onStatus }) {
     },
     sync,
     refresh(now = Date.now()) {
-      return cache.pending.length || now - checkedAt >= REFRESH_AFTER ? sync() : Promise.resolve();
+      return stale || cache.pending.length || now - checkedAt >= REFRESH_AFTER ? sync() : Promise.resolve();
     },
     ready: () => loading,
     reload,
@@ -336,6 +347,8 @@ export function createStore({ config, onChange, onStatus }) {
     reset() {
       clearTimeout(timer);
       resets++;
+      // A reload now would read the copy before it is removed.
+      stale = false;
       cache = { ...emptyCopy(), pending: [] };
       setView(replay(cache.base, []));
       cachedKey = null;

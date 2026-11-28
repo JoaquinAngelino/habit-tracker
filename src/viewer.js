@@ -39,7 +39,8 @@ function follow(next) {
 // The key after the dot stays in the address's fragment, which servers never receive.
 async function sharedLane(link) {
   const [token, key] = link.split(".");
-  const tools = links().length > 1 ? [el("button", { type: "button", class: "btn-text btn-small", textContent: t("sharedRemove"), onclick: () => follow(links().filter((x) => x !== link)) })] : [];
+  const remove = el("button", { type: "button", class: "btn-text btn-small", textContent: t("sharedRemove"), onclick: () => follow(links().filter((x) => x !== link)) });
+  const tools = links().length > 1 ? [remove] : [];
   try {
     const shared = JSON.parse(await openWithKey(await readShare(token), key));
     const [y, m, d] = shared.updated.split("-").map(Number);
@@ -47,7 +48,7 @@ async function sharedLane(link) {
     const legend = heatmapLegend({ less: t("legendLess"), more: t("legendMore"), slip: t("legendSlip"), off: t("legendOff") });
     return lane("green", shared.name || t("sharedTitle"), { count: t("sharedUpdated", { date }), tools: [legend, ...tools], rows: shared.habits.map(row) });
   } catch {
-    return lane("muted", t("sharedTitle"), { tools, rows: [], empty: t("sharedGone") });
+    return lane("muted", t("sharedTitle"), { tools: [remove], rows: [], empty: t("sharedGone") });
   }
 }
 

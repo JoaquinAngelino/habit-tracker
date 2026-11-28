@@ -96,7 +96,6 @@ With **Remember** on, the passphrase, sign-in and email stay in `localStorage`; 
 | `DELETE /session` | Signs out |
 | `GET /vault` | Returns the encrypted file as raw bytes with its version in `X-Version`, or `204` while the `X-Have` version is still current |
 | `PUT /vault` | Saves the bytes if the `X-Version` sent (`0` for none yet) is still current, otherwise `409` with the newer file |
-
 | `DELETE /account` | Deletes the account and its data |
 | `POST /passkey/challenge` | Returns a challenge, good once and for 5 minutes |
 | `POST /passkey/register` | Stores a passkey's public key: for a new account, or for the account of a session that began in the last 10 minutes, whose other sessions then end |
@@ -133,5 +132,5 @@ No build step.
 
 ```sh
 npm start   # python3 -m http.server 8765, an origin the worker allows
-npm test    # node --test
+npm test    # node --test, on Node 22.13 or newer
 ```
