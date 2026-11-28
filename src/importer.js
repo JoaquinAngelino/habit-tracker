@@ -1,4 +1,4 @@
-import { emptyData, normalize } from "./lib.js";
+import { emptyData, normalize, MIN_DATE } from "./lib.js";
 
 const formatError = () => Object.assign(new Error("Unrecognized file"), { code: "errImport" });
 
@@ -39,9 +39,11 @@ export function parseCsv(text) {
   return rows.map((r) => r.map((c) => c.trim())).filter((r) => r.some(Boolean));
 }
 
+// Dates before MIN_DATE are typos, and would start a habit decades back.
 const isoDate = (value) => {
   const m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/.exec(value) ?? /^(\d{4})(\d{2})(\d{2})$/.exec(value);
-  return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : null;
+  const date = m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : null;
+  return date && date >= MIN_DATE ? date : null;
 };
 
 function amount(value) {

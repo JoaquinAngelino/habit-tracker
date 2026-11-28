@@ -1,4 +1,4 @@
-import { addDays, later, weekday, entry, isDone, isOff, habitAt, streak, recentLevels, mean } from "./lib.js";
+import { addDays, later, weekday, entry, isOff, periodsOf, countsTowardRate, streak, recentLevels, mean } from "./lib.js";
 
 export const SHARED_WEEKS = 12;
 
@@ -6,18 +6,21 @@ const perDay = (habit) => habit.type !== "weekly" && habit.type !== "monthly";
 // For an avoid habit "done" means a clean day, which would read backwards next to its name.
 const correlatable = (habit) => perDay(habit) && habit.type !== "avoid";
 
-// Each day from `from` to `to` the habit was due, with whether it got done. Today counts only once it is done,
-// and for weekly and monthly habits done means logged that day. Days whose rules fail `keep` are left out.
+// Each day from `from` to `to` the habit was due, with whether it got done, by the rules rates use. For weekly
+// and monthly habits each day counts, done when logged that day. Days whose rules fail `keep` are left out.
 export function dueDays(data, habit, from, to, today, keep = () => true) {
   const out = new Map();
-  for (let d = later(from, habit.start); d <= to; d = addDays(d, 1)) {
-    const rule = habitAt(habit, d);
-    if (!keep(rule)) continue;
-    const done = isDone(rule, entry(data, habit.id, d));
-    const avoid = rule.type === "avoid";
-    if ((!done || avoid) && isOff(data, habit, d)) continue;
-    if (!done && d === today && !avoid) continue;
-    out.set(d, done);
+  for (const x of periodsOf(data, habit, from, to)) {
+    if (!keep(x.rule)) continue;
+    if (x.unit === "day") {
+      if (countsTowardRate(x, today)) out.set(x.start, x.met);
+      continue;
+    }
+    for (let d = later(x.start, from); d <= x.end && d <= to; d = addDays(d, 1)) {
+      const done = entry(data, habit.id, d) > 0;
+      if (!done && (isOff(data, habit, d) || d === today)) continue;
+      out.set(d, done);
+    }
   }
   return out;
 }

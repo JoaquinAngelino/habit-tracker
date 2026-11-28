@@ -517,7 +517,6 @@ label.item-tape:focus-within { outline: 2px solid var(--ink); outline-offset: 2p
 .stat { display: grid; gap: var(--space-1); }
 .stat dt { color: var(--muted); font: 600 var(--text-xs)/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; }
 .stat dd { font: 700 var(--text-xl)/1 var(--font-tape); letter-spacing: 0.03em; font-variant-numeric: tabular-nums; }
-.stats-wide { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-left: 0; }
 
 .heatmap-wrap { margin-left: var(--tape-column); overflow-x: auto; scrollbar-width: thin; }
 .heatmap-block { display: grid; gap: var(--space-1); margin-left: var(--tape-column); min-width: 0; }
@@ -988,7 +987,6 @@ select {
   .icon-btn { width: 44px; height: 44px; }
 
   .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-left: 0; }
-  .stats-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .heatmap-wrap, .heatmap-block, .steps, .weekday-bars, .habit-details { margin-left: 0; }
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .segment { height: 44px; padding: 0 var(--space-2); }

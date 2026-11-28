@@ -1,7 +1,7 @@
 import { $, el, icon, iconButton, mark, lane, toast, heatmap as heatmapGrid, heatmapLegend, lineChart, columnChart } from "./ui.js";
-import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, lastDay, withRules, changesRules, asksRuleChoice, hasPastRules, rulesSince } from "./lib.js";
+import { TYPES, KINDS, REPEATS, sortTasks, localIso, addDays, weekStart, uid, entry, note, isDone, isAmount, periodCount, streak, rate, recentLevels, goalProgress, canSchedule, isSkipped, isOnBreak, isOff, completeTask, reopenTask, rescheduled, timerMinutes, reminderTimes, habitAt, archiveOps, restoreOps, MIN_DATE, withRules, changesRules, asksRuleChoice, hasPastRules, rulesSince } from "./lib.js";
 import { weekdayPattern, correlations, moodLinks, sharedProgress } from "./insights.js";
-import { UNITS, AVERAGE_OF, KPIS, GLOBAL_KPIS, LOWER_BETTER, comparesFor, kpiValue, rangeFor, compare, habitFacts, measure, rangesWithData, trendRanges, yearEarlier, habitExtremes, distribution, pastRanges, metricsCsv } from "./metrics.js";
+import { UNITS, AVERAGE_OF, KPIS, GLOBAL_KPIS, LOWER_BETTER, RUN_KPIS, amountTotals, comparesFor, kpiValue, rangeFor, compare, habitFacts, measure, rangesWithData, trendRanges, yearEarlier, habitExtremes, distribution, pastRanges, metricsCsv } from "./metrics.js";
 import { toIcs } from "./ics.js";
 import { importFile } from "./importer.js";
 import { drawCard } from "./card.js";
@@ -52,7 +52,7 @@ const ui = {
   popped: null,
   shown: null,
   period: { unit: "week", back: 0, compare: "previous", full: false, from: null, to: null, kpi: "rate", group: "", overlay: false, details: null },
-  // A rule change waiting for "from today" or "since the rules began", and what was picked per habit today.
+  // A rule change waiting for its scope, and the scope picked per habit today.
   rulePrompt: null,
   rulesPicked: {},
   timer: loadTimer(),
@@ -920,7 +920,7 @@ const SCALE_KPIS = new Set(["mood", "energy"]);
 function kpiText(key, v) {
   if (v == null) return "–";
   if (PERCENT_KPIS.has(key)) return percent(v);
-  if (key === "longest") return units(Math.round(v), "day");
+  if (RUN_KPIS.has(key)) return units(Math.round(v), "day");
   return num(v);
 }
 
@@ -957,7 +957,10 @@ function compared() {
   return rememberAll("compare", key, () => {
     const facts = factsIn(factsOf(), p.group);
     const { before, ranges } = compare(data(), facts, p.unit, range, p.compare, { full: p.full });
-    return { range, facts, now: measure(data(), facts, range), before, label: before ? compareLabel(p.unit, p.compare, ranges) : "" };
+    const now = measure(data(), facts, range);
+    // Today, set against a whole day, counts what is still open as not done yet.
+    if (p.unit === "day" && range.cut === today() && now.pending) now.rate = now.done / (now.due + now.pending);
+    return { range, facts, now, before, label: before ? compareLabel(p.unit, p.compare, ranges) : "" };
   });
 }
 
@@ -965,7 +968,7 @@ function shownKpis(now, before) {
   const has = (key) => kpiValue(now, key) != null || (before && kpiValue(before, key) != null);
   return KPIS.filter((key) => {
     if (ui.period.group && GLOBAL_KPIS.has(key)) return false;
-    if (key === "slips") return now.rows.some((r) => r.rule.type === "avoid") || now.slips > 0;
+    if (key === "slips" || key === "longestClean") return now.rows.some((r) => r.rule.type === "avoid") || now.slips > 0;
     if (SCALE_KPIS.has(key) || key === "onTime") return has(key);
     if (key === "tasksDone" || key === "overdue") return data().tasks.length > 0;
     return true;
@@ -1043,11 +1046,12 @@ function compareControls(range) {
       const input = el("input", {
         type: "date",
         value: p[field],
+        min: MIN_DATE,
         max: today(),
         "aria-label": label,
         "data-focus-key": `period:${field}`,
         onchange: () => {
-          if (!input.value) return;
+          if (!input.value || input.value < MIN_DATE) return;
           p[field] = input.value;
           if (p.to < p.from) Object.assign(p, field === "from" ? { to: p.from } : { from: p.to });
           set({ back: 0 });
@@ -1175,8 +1179,10 @@ function compareRow(row, before, range, facts) {
   const open = p.details === habit.id;
   const now = rowFigures(row);
   const marks = [];
-  if (row.due && rule.type === "avoid") marks.push(mark(t("cleanDays", countOf(row.clean))));
-  else if (row.due) marks.push(mark(t("doneOfDue", { done: num(row.done), due: num(row.due) })));
+  if (row.due && rule.type === "avoid") {
+    marks.push(mark(t("cleanDays", countOf(row.clean))));
+    if (row.longestClean) marks.push(mark(`${t("kpi_longestClean")}: ${units(Math.round(row.longestClean), "day")}`));
+  } else if (row.due) marks.push(mark(t("doneOfDue", { done: num(row.done), due: num(row.due) })));
   else if (row.total && !isAmount(rule)) marks.push(mark(t("loggedTimes", countOf(row.total))));
   if (isAmount(rule) && row.total) marks.push(mark(`${num(row.total)} ${unitOf(rule)}`.trim()));
   // Slips and rates cannot be set against each other, as when the habit's type changed in between.
@@ -1209,13 +1215,24 @@ function compareRows(now, before, range, facts) {
   const change = (r) => {
     const b = was.get(r.habit.id);
     if (!b) return -1;
-    const key = r.rule.type === "avoid" ? "slips" : "rate";
-    return r[key] == null || b[key] == null ? -1 : Math.abs(r[key] - b[key]) / (key === "slips" ? Math.max(1, b.slips) : 1);
+    // Slips as a share of the days due, so both kinds of change sit on one scale.
+    if (r.rule.type === "avoid") return b.slips == null ? -1 : Math.abs(r.slips - b.slips) / Math.max(1, r.due, b.due);
+    return r.rate == null || b.rate == null ? -1 : Math.abs(r.rate - b.rate);
   };
   return now.rows
     .filter((r) => r.due || r.slips || r.total)
     .sort((a, b) => change(b) - change(a))
     .map((r) => compareRow(r, before ? rowFigures(was.get(r.habit.id)) : null, range, facts));
+}
+
+function yearExtras(m) {
+  const totals = amountTotals(m);
+  if (!m.top && !m.longest && !totals.length) return null;
+  return el("p", { class: "item-marks" }, [
+    m.top ? mark(`${t("topHabit")}: ${habitName(m.top.habit)} · ${units(m.top.count, "day")}`, "green") : null,
+    m.longest ? mark(`${t("kpi_longest")}: ${habitName(m.longest.habit)} · ${units(m.longest.count, "day")}`) : null,
+    ...totals.map((r) => mark(`${habitName(r.habit)}: ${num(r.total)} ${unitOf(r.rule)}`.trim())),
+  ]);
 }
 
 function compareLane() {
@@ -1228,10 +1245,7 @@ function compareLane() {
     rows.push(el("article", { class: "item" }, [
       el("p", { class: "meta-label", textContent: before ? t("comparedWith", { period: label }) : t("noComparison") }),
       el("div", { class: "kpis" }, kpis.map((key) => kpiTile(key, now, before))),
-      p.unit === "year" && (now.top || now.longest) ? el("p", { class: "item-marks" }, [
-        now.top ? mark(`${t("topHabit")}: ${habitName(now.top.habit)} · ${units(now.top.days, "day")}`, "green") : null,
-        now.longest ? mark(`${t("longestStreak")}: ${habitName(now.longest.habit)} · ${units(now.longest.count, "day")}`) : null,
-      ]) : null,
+      p.unit === "year" ? yearExtras(now) : null,
     ]));
     rows.push(...trendCharts(range, facts));
     rows.push(...compareRows(now, before, range, facts));
@@ -1444,15 +1458,9 @@ function rulePromptRow(habit) {
   ]);
 }
 
-// The days it was archived become a break, so they do not count as missed.
 function restoreHabit(habit) {
   const current = data().habits.find((h) => h.id === habit.id);
-  if (!current) return;
-  const from = addDays(lastDay(data(), current, today()), 1);
-  const to = addDays(today(), -1);
-  const ops = [{ t: "habit", habit: { ...current, archived: false, archivedAt: undefined } }];
-  if (from <= to) ops.push({ t: "break", break: { id: uid(), from, to, habitId: current.id, archived: true } });
-  commitAll(ops);
+  if (current) commitAll(restoreOps(data(), current, today(), uid));
 }
 
 function editRow(habit) {
@@ -1556,7 +1564,7 @@ function editRow(habit) {
   const archive = () => {
     const now = data().habits.find((h) => h.id === habit.id);
     ui.openHabit = null;
-    undoable(t("archivedName", { name: habitName(now) }), [{ t: "habit", habit: { ...now, archived: true, archivedAt: today() } }], () => patchHabit(habit.id, { archived: false, archivedAt: undefined }));
+    undoable(t("archivedName", { name: habitName(now) }), archiveOps(now, today()), () => patchHabit(habit.id, { archived: false, archivedAt: undefined }));
   };
   const remove = () => {
     ui.openHabit = null;
@@ -1585,6 +1593,8 @@ function breakRow(item) {
   // Moving one end past the other drags the other along.
   const save = (patch) => {
     const next = { ...item, ...patch };
+    // The mark covers the days its own habit was archived, so it does not follow the break to another one.
+    if ("habitId" in patch && patch.habitId !== item.habitId) delete next.archived;
     if (next.to < next.from) Object.assign(next, patch.from ? { to: next.from } : { from: next.to });
     store.commit({ t: "break", break: next });
   };

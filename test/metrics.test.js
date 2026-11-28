@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { emptyData, streak, rate, isOff, level, goalProgress, habitAt, withRules, rulesSince, changesRules, asksRuleChoice, lastDay, recentLevels } from "../src/lib.js";
+import { emptyData, streak, rate, isOff, level, goalProgress, habitAt, withRules, rulesSince, changesRules, asksRuleChoice, lastDay, recentLevels, restoreOps, archiveOps } from "../src/lib.js";
 import { correlations } from "../src/insights.js";
 import { toIcs } from "../src/ics.js";
-import { buildFacts, habitFacts, measure, rangeFor, comparisonRanges, compare, averageMeasure, bestRange, trendRanges, yearEarlier, habitExtremes, distribution, metricsCsv, periodAround, comparesFor } from "../src/metrics.js";
+import { habitFacts, measure, rangeFor, comparisonRanges, compare, averageMeasure, bestRange, trendRanges, yearEarlier, habitExtremes, distribution, metricsCsv, periodAround, comparesFor, amountTotals } from "../src/metrics.js";
 
 const TODAY = "2026-11-24"; // a Tuesday
 const daily = { id: "h", name: "Read", type: "check", target: 1, unit: "", start: "2026-11-01" };
@@ -21,6 +21,7 @@ const days = (from, to, value = 1) => {
   return out;
 };
 const logOf = (id, dates) => Object.fromEntries(Object.entries(dates).map(([date, v]) => [date, { [id]: v }]));
+const buildFacts = (data, habits, today) => habits.map((h) => habitFacts(data, h, today)).filter(Boolean);
 const measureOf = (data, habits, from, cut, today = TODAY) => measure(data, buildFacts(data, habits, today), { from, cut });
 
 test("raising a target from today keeps past days done under the old target", () => {
@@ -96,12 +97,18 @@ test("daily to weekly mid-week: the change's week is weekly and counts that week
   assert.equal(streak(data, weekly, "2026-11-29").current, 1);
 });
 
-test("weekly to daily mid-week drops the week the change cuts", () => {
+test("a type change mid-period keeps the cut period's days before it only if they met the old target", () => {
   const weekly = { ...daily, type: "weekly", target: 1 };
   const check = withRules(weekly, { type: "check" }, "2026-11-25", "today");
   const data = dataWith(check, logOf("h", { "2026-11-17": 1, "2026-11-23": 1, "2026-11-25": 1 }));
-  const m = measureOf(data, [check], "2026-11-16", "2026-11-25", "2026-11-25");
-  assert.deepEqual([m.due, m.done], [2, 2]);
+  const met = measureOf(data, [check], "2026-11-16", "2026-11-25", "2026-11-25");
+  assert.deepEqual([met.due, met.done], [3, 3]);
+  delete data.log["2026-11-23"];
+  const unmet = measureOf(data, [check], "2026-11-16", "2026-11-25", "2026-11-25");
+  assert.deepEqual([unmet.due, unmet.done], [2, 2]);
+  const monthly = withRules({ ...daily, type: "monthly", target: 1, start: "2026-10-01" }, { type: "check" }, "2026-11-18", "today");
+  const month = measureOf(dataWith(monthly, { "2026-11-05": { h: 1 } }), [monthly], "2026-11-01", "2026-11-17", "2026-11-18");
+  assert.deepEqual([month.due, month.done], [1, 1]);
 });
 
 test("monthly to weekly at the start of a month keeps the month that ended before it", () => {
@@ -159,7 +166,7 @@ test("correlations leave out days from an era they cannot read", () => {
   assert.deepEqual(correlations(data, [a, b], TODAY, { minDays: 3 }), []);
 });
 
-test("an archived habit counts until it was archived, or a later last entry", () => {
+test("an archived habit counts until the day it was archived, or a later last entry", () => {
   const data = dataWith(daily, { "2026-11-05": { h: 1 } });
   assert.equal(lastDay(data, daily, TODAY), TODAY);
   assert.equal(lastDay(data, { ...daily, archived: true, archivedAt: "2026-11-10" }, TODAY), "2026-11-10");
@@ -167,7 +174,7 @@ test("an archived habit counts until it was archived, or a later last entry", ()
   assert.equal(lastDay(data, { ...daily, archived: true, archivedAt: "2026-11-02" }, TODAY), "2026-11-05");
   const archived = { ...daily, archived: true, archivedAt: "2026-11-10" };
   assert.equal(measureOf(data, [archived], "2026-11-16", "2026-11-22").rows.length, 0);
-  assert.equal(measureOf(data, [archived], "2026-11-01", "2026-11-15").rows[0].due, 9);
+  assert.equal(measureOf(data, [archived], "2026-11-01", "2026-11-15").rows[0].due, 10);
 });
 
 test("today counts only once done, and days before the start or off do not count", () => {
@@ -227,8 +234,9 @@ test("a week adds up what was due and done, and a year totals check-ins, amounts
   assert.deepEqual([week.done, week.due, week.tasksDone, week.onTime, week.overdue, week.mood, week.energy], [4, 15, 1, 0, 1, 5, 3]);
   assert.deepEqual([week.rows[2].total, week.rows[2].average, week.rows[2].bestDay], [14, 2, 10]);
   const year = measureOf(data, [daily, weekly, pages], "2026-01-01", TODAY);
-  assert.deepEqual([year.checkins, year.activeDays, year.tasksDone, year.top.habit.id, year.top.days], [7, 3, 1, "h", 3]);
+  assert.deepEqual([year.checkins, year.activeDays, year.tasksDone, year.top.habit.id, year.top.count], [7, 3, 1, "h", 3]);
   assert.deepEqual([year.longest.habit.id, year.longest.count], ["h", 2]);
+  assert.deepEqual(amountTotals(year).map((x) => [x.habit.id, x.total]), [["p", 14]]);
 });
 
 test("the longest run is in days: weekly runs and a run across a type change do not count", () => {
@@ -251,11 +259,12 @@ test("an every-N habit's longest run in a year counts the days it was scheduled"
   assert.equal(measureOf(data, [habit], "2026-01-01", "2026-01-08", "2026-01-08").longest.count, 4);
 });
 
-test("an avoid habit counts slips and clean days, and stays out of the longest streak", () => {
+test("an avoid habit counts slips, clean days and its longest clean run, and stays out of the longest streak", () => {
   const avoid = { ...daily, type: "avoid" };
   const data = dataWith(avoid, { "2026-11-10": { h: 1 } });
   const m = measureOf(data, [avoid], "2026-11-01", TODAY);
   assert.deepEqual([m.slips, m.rows[0].clean, m.longest, m.checkins], [1, 23, null, 0]);
+  assert.deepEqual(m.longestClean, { habit: avoid, count: 14 });
 });
 
 test("an amount's average leaves out today's unfinished amount, and a day off logged anyway counts", () => {
@@ -336,13 +345,6 @@ test("recent levels follow each day's rules", () => {
   assert.equal(recentLevels(data, water, TODAY, 1)[0], 4);
 });
 
-test("a week that starts as daily days and ends weekly counts both", () => {
-  const weekly = withRules(daily, { type: "weekly", target: 2 }, "2026-11-25", "today");
-  const data = dataWith(weekly, logOf("h", { "2026-11-23": 1, "2026-11-24": 1, "2026-11-26": 1 }));
-  const m = measureOf(data, [weekly], "2026-11-23", "2026-11-29", "2026-11-29");
-  assert.deepEqual([m.due, m.done, m.rows[0].longest], [3, 3, 2]);
-});
-
 test("a week met by an entry dated after today still counts today", () => {
   const weekly = { ...daily, type: "weekly", target: 2 };
   const data = dataWith(weekly, { "2026-11-23": { h: 1 }, "2026-11-25": { h: 1 } });
@@ -358,4 +360,87 @@ test("an avoid habit skips the days it was archived, but not other breaks", () =
   assert.equal(isOff(data, avoid, "2026-11-02"), false);
   assert.deepEqual(streak(data, avoid, TODAY), { current: 8, best: 8, unit: "day" });
   assert.equal(measureOf(data, [avoid], "2026-11-01", TODAY).rows[0].due, 8);
+});
+
+test("a clean run starts again where an avoid habit's type changed", () => {
+  const avoid = withRules({ ...daily, type: "avoid" }, { type: "check" }, "2026-11-11", "today");
+  const back = withRules(avoid, { type: "avoid" }, "2026-11-16", "today");
+  const data = dataWith(back, logOf("h", days("2026-11-11", "2026-11-15")));
+  const row = measureOf(data, [back], "2026-11-01", TODAY).rows[0];
+  assert.deepEqual([row.longestClean, row.longest, row.clean], [10, 5, 19]);
+});
+
+test("a slip on an avoid habit's archived day is a slip, not a check-in", () => {
+  const avoid = { ...daily, type: "avoid" };
+  const data = dataWith(avoid, { "2026-11-15": { h: 1 } });
+  data.breaks.push({ id: "a", from: "2026-11-10", to: "2026-11-20", habitId: "h", archived: true });
+  const m = measureOf(data, [avoid], "2026-11-01", TODAY);
+  assert.deepEqual([m.checkins, m.activeDays, m.slips], [0, 0, 1]);
+});
+
+test("restoring a habit breaks only the days after it was archived, and only when that day is known", () => {
+  const id = () => "b";
+  const archived = archiveOps(daily, "2026-11-10")[0].habit;
+  const data = dataWith(archived, { "2026-11-05": { h: 1 } });
+  assert.deepEqual(restoreOps(data, archived, TODAY, id)[1].break, { id: "b", from: "2026-11-11", to: "2026-11-23", habitId: "h", archived: true });
+  assert.equal(restoreOps(data, { ...archived, archivedAt: undefined }, TODAY, id).length, 1);
+  assert.equal(restoreOps(data, { ...archived, archivedAt: TODAY }, TODAY, id).length, 1);
+  data.log["2026-11-20"] = { h: 1 };
+  assert.equal(restoreOps(data, archived, TODAY, id)[1].break.from, "2026-11-21");
+  assert.equal(restoreOps(data, archived, TODAY, id)[0].habit.archived, false);
+});
+
+test("an avoid habit archived before archive days were kept counts on, whatever its last slip", () => {
+  const avoid = { ...daily, type: "avoid", archived: true };
+  assert.equal(lastDay(dataWith(avoid, { "2026-11-03": { h: 1 } }), avoid, TODAY), TODAY);
+});
+
+test("eras dated today or later from a wrong clock do not lock the rules, and unknown era fields are kept", () => {
+  const habit = { ...daily, type: "amount", target: 8, past: [{ until: "2026-11-01", target: 4, unit: "ml" }, { until: "2027-06-30", type: "check" }] };
+  assert.equal(asksRuleChoice(habit, { target: 10 }, TODAY), true);
+  const next = withRules(habit, { target: 10 }, TODAY, "today");
+  assert.deepEqual(next.past.map((e) => [e.until, e.unit]), [["2026-11-01", "ml"], ["2026-11-23", undefined]]);
+  assert.equal(habitAt(next, TODAY).target, 10);
+});
+
+test("history before 1970 is not walked", () => {
+  const ancient = { ...daily, start: "0024-05-25" };
+  const data = dataWith(ancient, { "2026-11-23": { h: 1 } });
+  assert.equal(habitFacts(data, ancient, TODAY).start, "1970-01-01");
+  assert.equal(measureOf(data, [ancient], "0001-01-01", TODAY).from, "1970-01-01");
+});
+
+test("a day with a slip is not perfect", () => {
+  const avoid = { ...daily, id: "a", type: "avoid" };
+  const data = dataWith([daily, avoid], { "2026-11-20": { h: 1, a: 1 }, "2026-11-21": { h: 1 } });
+  assert.equal(measureOf(data, [daily, avoid], "2026-11-20", "2026-11-21").perfectDays, 1);
+});
+
+test("a value that is not a number is ignored", () => {
+  const pages = { ...daily, type: "amount", target: 10 };
+  const row = measureOf(dataWith(pages, { "2026-11-20": { h: "2 pages" }, "2026-11-21": { h: 10 } }), [pages], "2026-11-20", "2026-11-21").rows[0];
+  assert.deepEqual([row.total, row.average], [10, 5]);
+});
+
+test("a task created after the end of a range is not overdue in it", () => {
+  const data = dataWith(daily);
+  data.tasks.push({ id: "t", title: "x", due: "2026-11-10", created: "2026-11-20", done: "" });
+  assert.equal(measureOf(data, [daily], "2026-11-01", "2026-11-15").overdue, 0);
+  assert.equal(measureOf(data, [daily], "2026-11-01", "2026-11-21").overdue, 1);
+});
+
+test("the last-days rate counts a week on the day it was met, like Compare", () => {
+  const weekly = { ...daily, type: "weekly", target: 1 };
+  const data = dataWith(weekly, { "2026-11-16": { h: 1 } });
+  assert.equal(rate(data, weekly, "2026-11-25", 7), null);
+  assert.equal(rate(data, weekly, "2026-11-22", 7), 1);
+});
+
+test("many eras resolve to the one covering each date", () => {
+  const past = Array.from({ length: 50 }, (_, i) => ({ until: `2025-${String(1 + Math.floor(i / 5)).padStart(2, "0")}-${String(1 + (i % 5) * 5).padStart(2, "0")}`, target: i + 1 }));
+  const habit = { ...daily, type: "amount", start: "2025-01-01", past };
+  assert.equal(habitAt(habit, "2025-01-01").target, 1);
+  assert.equal(habitAt(habit, "2025-01-02").target, 2);
+  assert.equal(habitAt(habit, "2025-10-21").target, 50);
+  assert.equal(habitAt(habit, "2025-10-22"), habit);
 });

@@ -23,7 +23,7 @@ A day off does not break the streak or count against the completion rate, and st
 
 ### Order, groups and times
 
-Changing a habit's type, target or schedule asks how far back the change reaches: from today, so earlier days keep the rules they were logged under; since its current rules began; or its whole history. Later changes the same day follow the same answer. A new unit does not convert amounts already logged.
+Changing a habit's type, target or schedule asks how far back the change reaches: from today, so earlier days keep the rules they were logged under; since its current rules began; or its whole history. Later changes the same day follow the same answer until the app is reloaded. A new unit does not convert amounts already logged.
 
 The arrows in **Habits** set the order. A habit with a group, such as Morning, is listed with the rest of its group on **Today**, where **Mark all done** checks off the group's daily habits at once. A habit with a time of day shows it, and **Today** lists habits by time.
 
@@ -35,7 +35,7 @@ Each habit takes a note per day, and **Today → The day** takes a mood and an e
 
 Besides streaks, rates and the heatmap, **Progress** shows:
 
-- **Compare**: a day, week, month, year or chosen range, against the one before, the same one a year earlier, the average of the last few, or the best one so far. Figures include completion, times met, check-ins, perfect days (everything due got done), active days, the longest daily streak, slips, mood, energy, and tasks done, on time and overdue, each with its change. With a group picked, mood, energy and tasks are left out, since they belong to no group. While a period is still running it is compared with the same number of days of the other one, unless **Whole period** is picked. Tap a figure to see its trend over the last 12 periods, optionally next to the same periods a year earlier. Each habit shows its own change, and **Details** shows its trend, its best and worst periods, and for amounts how much was logged on each day. **Download CSV** saves what is shown, and **Settings → Download metrics** saves every month so far.
+- **Compare**: a day, week, month, year or chosen range, against the one before, the same one a year earlier, the average of the last few, or the best one so far. Figures include completion, times met, check-ins, perfect days (everything due got done), active days, the longest daily streak, slips and the longest clean run, mood, energy, and tasks done, on time and overdue, each with its change. With a group picked, mood, energy and tasks are left out, since they belong to no group. A year also shows the most done habit, the longest streak and the total of each amount habit. While a period is still running it is compared with the same number of days of the other one, unless **Whole period** is picked. Tap a figure to see its trend over the last 12 periods, optionally next to the same periods a year earlier. Each habit shows its own change, and **Details** shows its trend, its best and worst periods, and for amounts how many days fell in each range of amounts. **Download CSV** saves what is shown, and **Settings → Download metrics** saves every month so far.
 - **By day of the week**: how often each habit got done on each weekday over the last 90 days.
 - **Patterns**: habits that tend to get done or missed on the same days, and habits whose done days have a different average mood. They need about two weeks of history.
 

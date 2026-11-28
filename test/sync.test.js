@@ -338,3 +338,25 @@ test("coming back to the app checks the server only when the last check is a few
   assert.equal(a.store.hasPending(), false);
   globalThis.fetch = real;
 });
+
+test("a sync that only pushes this device's edits keeps each habit's revision, and one bringing another device's resets it", async () => {
+  const server = await fakeServer();
+  const session = await server.sessionFor("g1");
+  const a = accountDevice(session);
+  const b = accountDevice(session);
+  const other = { ...habit, id: "o", name: "Run" };
+  a.store.commit({ t: "habit", habit });
+  a.store.commit({ t: "habit", habit: other });
+  await a.store.sync();
+  const before = a.store.revision("o");
+  a.store.commit({ t: "log", date: "2026-11-25", id: "h", v: 1 });
+  await a.store.sync();
+  assert.equal(a.store.revision("o"), before);
+  await b.store.sync();
+  b.store.commit({ t: "log", date: "2026-11-25", id: "o", v: 1 });
+  await b.store.sync();
+  a.store.commit({ t: "log", date: "2026-11-26", id: "h", v: 1 });
+  await a.store.sync();
+  assert.notEqual(a.store.revision("o"), before);
+  assert.equal(a.store.data().log["2026-11-25"].o, 1);
+});

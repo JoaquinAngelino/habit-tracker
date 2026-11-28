@@ -91,10 +91,12 @@ export function createStore({ config, onChange, onStatus }) {
 
   let edits = 0;
 
-  function setView(next) {
+  // `same` when only this device's own edits were replayed, so each habit's stats still hold.
+  function setView(next, { same = false } = {}) {
     view = next;
-    generation++;
     edits++;
+    if (same) return;
+    generation++;
     touched.clear();
   }
 
@@ -234,6 +236,7 @@ export function createStore({ config, onChange, onStatus }) {
       // Edits on top of a copy already held go straight to the write; a conflict hands back the newer data.
       let remote = held && cache.pending.length ? held : await readFile(cfg, held);
       if (held && remote === held && !cache.pending.length && !cache.merging) return synced();
+      let ownCopy = remote === held && !cache.merging;
       for (let attempt = 0; ; attempt++) {
         if (start !== resets) return;
         const envelope = remote && readEnvelope(remote.bytes);
@@ -256,6 +259,7 @@ export function createStore({ config, onChange, onStatus }) {
           } catch (err) {
             if (!err.conflict || attempt >= 4) throw err;
             remote = err.current;
+            ownCopy = false;
             continue;
           }
         }
@@ -264,7 +268,7 @@ export function createStore({ config, onChange, onStatus }) {
         const pushed = new Set(sent);
         const unsent = () => cache.pending.filter((op) => !pushed.has(op));
         Object.assign(cache, { base: next, version, bytes, merging: false });
-        setView(replay(next, unsent()));
+        setView(replay(next, unsent()), { same: ownCopy });
         // Pushed edits leave the list only once the copy holding them is saved.
         if ((await saveCopy()) && start === resets) {
           cache.pending = unsent();
